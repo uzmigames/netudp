@@ -1,21 +1,29 @@
 # netudp
 
-High-performance UDP networking library for game servers.
+High-performance, zero-GC UDP networking library for game servers.
 
 ## Overview
 
-**netudp** is a C/C++ library designed for real-time game server networking. It provides reliable and unreliable UDP communication with minimal latency, built for scenarios where thousands of concurrent players require sub-millisecond packet processing.
+**netudp** is a C++17 library with `extern "C"` public API, designed for real-time game server networking. Zero garbage collection, SIMD-accelerated, with reliable and unreliable UDP communication at sub-millisecond latency. Built for dedicated servers handling thousands of concurrent players at 100K+ packets/second.
+
+**SDK targets:** UzmiGames Engine (native C++), Unreal Engine 5, Unity, Godot 4.
 
 ### Key Features
 
-- **Connection management** — virtual connections over UDP with handshake, heartbeat, and timeout detection
-- **Reliability layer** — selective reliable delivery with sequence numbers, acknowledgments, and retransmission
-- **Unreliable fast-path** — zero-copy fire-and-forget for latency-critical data (position updates, inputs)
-- **Fragmentation & reassembly** — automatic splitting of messages that exceed MTU
-- **Channel system** — multiple logical channels per connection (reliable ordered, reliable unordered, unreliable)
-- **Encryption** — built-in AEAD encryption for all traffic after handshake
-- **Bandwidth control** — per-connection send rate limiting and congestion avoidance
-- **Cross-platform** — Windows, Linux, macOS via Zig CC cross-compilation
+- **Zero-GC** — no allocations after init. All memory pre-allocated from pools. Runs indefinitely without touching the heap.
+- **SIMD-accelerated** — runtime dispatch to SSE4.2 / AVX2 / NEON for crypto, CRC32C, buffer ops, ack scanning, and more
+- **Connect tokens** — secure authentication via encrypted tokens (netcode.io protocol). No online key exchange needed.
+- **4 channel types** — unreliable, unreliable sequenced, reliable ordered, reliable unordered. Priority + weight scheduling.
+- **Reliability** — piggybacked acks with delay field for continuous RTT. RTT-adaptive retransmission.
+- **Fragmentation** — transparent split/reassemble for messages up to 512KB
+- **Encryption** — ChaCha20-Poly1305 AEAD by default. AES-256-GCM compile-time option. Replay protection (256-entry window).
+- **Compression** — optional [netc](https://github.com/uzmigames/netc) integration (35-67% bandwidth savings on game packets)
+- **Nagle + flush** — automatic batching with per-message bypass. Multi-frame packets (ack + data in one UDP packet).
+- **Bandwidth control** — token bucket rate limiting + congestion avoidance
+- **Comprehensive stats** — ping, quality, throughput, queue depth, compression ratio per connection/channel
+- **Packet interfaces** — handler registration, lifecycle callbacks, zero-copy buffer acquire/send for game servers
+- **Cross-platform** — Windows, Linux, macOS, Android, iOS via CMake + Zig CC
+- **Engine SDKs** — C++ header-only wrapper, Unreal 5 plugin, Unity C# bindings, Godot 4 GDExtension
 
 ### Non-Goals
 
@@ -27,8 +35,9 @@ High-performance UDP networking library for game servers.
 
 ### Requirements
 
+- C++17 compiler (GCC 9+, Clang 10+, MSVC 2019+)
 - CMake 3.20+
-- Zig 0.13+ (used as C/C++ cross-compiler via `zig cc`)
+- Zig 0.13+ (optional, for cross-compilation via `zig c++`)
 - Google Test (fetched automatically via CMake FetchContent)
 
 ### Build Commands
@@ -84,21 +93,33 @@ See [docs/architecture.md](docs/architecture.md) for detailed design documentati
 
 ```
 netudp/
-├── include/netudp/       # Public API headers
+├── include/netudp/       # Public API headers (extern "C")
 │   ├── netudp.h          # Main API (server, client, send, recv)
-│   ├── types.h           # Public types and constants
-│   └── config.h          # Compile-time configuration
-├── src/                  # Implementation
-│   ├── socket/           # Platform socket abstraction
-│   ├── connection/       # Connection manager, handshake, heartbeat
-│   ├── channel/          # Channel types (reliable, unreliable)
-│   ├── reliability/      # Sequence numbers, acks, retransmission
+│   ├── netudp_types.h    # Public types and constants (POD structs)
+│   ├── netudp_buffer.h   # Buffer read/write helpers
+│   ├── netudp_token.h    # Connect token generation
+│   └── netudp_config.h   # Compile-time configuration
+├── src/                  # C++17 implementation (internal)
+│   ├── core/             # Pool<T>, FixedRingBuffer, FixedHashMap, clock
+│   ├── socket/           # Platform socket abstraction (Win/Linux/Mac)
+│   ├── connection/       # Connection state machine, handshake, tokens
+│   ├── channel/          # Channel types (reliable, unreliable, sequenced)
+│   ├── reliability/      # Sequence, ack bits, RTT, retransmission
 │   ├── fragment/         # Fragmentation and reassembly
-│   ├── crypto/           # Encryption (AEAD)
-│   └── core/             # Memory allocator, buffer pool, time
+│   ├── crypto/           # ChaCha20-Poly1305, AES-GCM, CRC32C
+│   ├── simd/             # SIMD dispatch (generic, SSE4.2, AVX2, NEON)
+│   ├── server.cpp        # Server implementation
+│   ├── client.cpp        # Client implementation
+│   └── api.cpp           # extern "C" wrappers → C++ internals
+├── sdk/                  # Engine bindings
+│   ├── cpp/              # C++ header-only wrapper (RAII, span, move)
+│   ├── unreal/           # Unreal Engine 5 plugin
+│   ├── unity/            # Unity C# P/Invoke bindings
+│   └── godot/            # Godot 4 GDExtension
+├── bench/                # Micro-benchmarks (PPS, latency, SIMD)
 ├── tests/                # Google Test suites
 ├── examples/             # Usage examples
-├── docs/                 # Design documentation
+├── docs/                 # Design documentation + analysis
 ├── cmake/                # CMake modules
 └── CMakeLists.txt        # Root build file
 ```

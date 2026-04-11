@@ -33,7 +33,7 @@ This architecture synthesizes the best patterns from six analyzed implementation
 
 8. **Multi-frame packets.** A single UDP packet carries ack + stop-waiting + data frames (GNS SNP pattern). Nagle timer with per-message bypass.
 
-9. **Pure C11, zero dependencies.** Vendored crypto (monocypher or libsodium subset). Optional netc for compression. Builds with `zig cc` for trivial cross-compilation to any target.
+9. **C++17 internal, `extern "C"` public API.** Implementation in C++17 for RAII, templates, constexpr, type safety, and native integration with the UzmiGames engine and Unreal Engine. Public API is flat `extern "C"` for universal FFI binding (Unity C#, Godot GDExtension, Rust, Go). Vendored crypto. Optional netc. Builds with CMake + Zig CC.
 
 10. **SIMD everywhere, not just crypto.** Every subsystem that touches data in bulk uses SIMD intrinsics with runtime dispatch: CRC32C, AEAD, buffer copy, ack bitmask scan, fragment reassembly, packet batching, statistics accumulation. Scalar fallback always available. Targets: SSE4.2, AVX2 (x86-64), NEON (ARM64), WASM SIMD (future). The goal is to process the maximum number of packets per CPU cycle.
 
@@ -134,7 +134,236 @@ This is critical for servers with 1000+ connections — regular `memcpy` thrashe
 
 ---
 
-## 3. Benchmark Framework
+## 3. C++17 Strategy
+
+### 3.1 Why C++ Instead of C
+
+The UzmiGames engine is C++. Unreal Engine is C++. The library benefits from C++ internally while keeping a flat C API for universal binding.
+
+| C++ Feature | How We Use It | Zero-GC Safe? |
+|---|---|---|
+| **RAII** (`unique_ptr`, custom deleters) | Pool handles auto-return on scope exit. No leaked buffers. | Yes — pool return, not free |
+| **Templates** | `Pool<T>`, `RingBuffer<T>`, type-safe buffer read/write | Yes — compile-time only |
+| **constexpr** | Compile-time CRC tables, packet size calculations, flag masks | Yes — no runtime cost |
+| **`std::span<T>`** (C++20 or polyfill) | Zero-copy views into packet buffers | Yes — no allocation |
+| **`std::array<T,N>`** | Fixed-size arrays with bounds checking in debug | Yes — stack only |
+| **`enum class`** | Type-safe channel types, packet types, error codes | Yes — same as int |
+| **Namespaces** | `netudp::internal::` vs `netudp::` vs flat C API | Yes — compile-time only |
+| **`alignas(64)`** | Cache-line alignment for pool entries, SIMD buffers | Yes — layout only |
+| **Move semantics** | Zero-copy buffer transfer between layers | Yes — pointer swap |
+| **`static_assert`** | Compile-time validation of struct sizes, alignment | Yes — compile-time |
+
+### 3.2 What We Do NOT Use (Zero-GC Violations)
+
+| Banned in Hot Path | Why |
+|---|---|
+| `std::string` | Heap allocation |
+| `std::vector` | Heap allocation, reallocation |
+| `std::map` / `std::unordered_map` | Heap allocation per entry |
+| `std::shared_ptr` | Atomic refcount = cache line bouncing |
+| `std::function` | Heap allocation for captures |
+| `new` / `delete` | Direct heap allocation |
+| `malloc` / `free` | Direct heap allocation |
+| Exceptions (`throw`) | Stack unwinding, unpredictable timing |
+| RTTI (`dynamic_cast`, `typeid`) | Runtime overhead |
+| `std::iostream` | Heap allocation, locale overhead |
+
+**Enforcement:** Custom `-Wno-exceptions` flag. Static analysis rule: any `new`/`malloc` in `src/` (outside `init`/`destroy`) fails CI.
+
+### 3.3 Allowed Containers (Zero-Alloc)
+
+```cpp
+namespace netudp {
+
+// Fixed-capacity ring buffer — pre-allocated, no heap
+template<typename T, size_t N>
+class FixedRingBuffer {
+    alignas(64) T data_[N];
+    uint32_t head_ = 0, tail_ = 0;
+public:
+    bool push(const T& item);
+    bool pop(T& out);
+    constexpr size_t capacity() const { return N; }
+};
+
+// Intrusive free-list pool — O(1) acquire/release, zero-alloc
+template<typename T>
+class Pool {
+    T* storage_;          // Single contiguous allocation at init
+    uint32_t* free_list_; // Stack of free indices
+    uint32_t free_count_;
+    uint32_t capacity_;
+public:
+    Pool(uint32_t capacity, Allocator& alloc);  // Allocates once
+    T* acquire();     // O(1) pop from free list
+    void release(T*); // O(1) push to free list
+};
+
+// Fixed hash map — open addressing, pre-allocated
+template<typename K, typename V, size_t N>
+class FixedHashMap {
+    struct Entry { K key; V value; bool occupied; };
+    alignas(64) Entry entries_[N];
+public:
+    V* find(const K& key);
+    bool insert(const K& key, const V& value);
+    bool remove(const K& key);
+};
+
+} // namespace netudp
+```
+
+### 3.4 Source Structure
+
+```
+include/
+├── netudp/
+│   ├── netudp.h              // Public C API (extern "C")
+│   ├── netudp_types.h        // Public types (POD structs, enums)
+│   ├── netudp_buffer.h       // Buffer read/write helpers (extern "C")
+│   ├── netudp_token.h        // Connect token generation (extern "C")
+│   └── netudp_config.h       // Compile-time configuration
+│
+src/
+├── core/                     // C++ internals (not exposed)
+│   ├── pool.hpp              // Pool<T>, FixedRingBuffer<T>
+│   ├── hash_map.hpp          // FixedHashMap<K,V,N>
+│   ├── buffer.hpp            // Internal buffer with span<uint8_t>
+│   ├── clock.hpp             // High-resolution timer
+│   └── assert.hpp            // Debug assertions
+├── connection/
+│   ├── connection.hpp        // Connection state machine
+│   ├── token.cpp             // Connect token encrypt/decrypt
+│   ├── handshake.cpp         // 4-step handshake
+│   └── rate_limiter.cpp      // Token bucket
+├── channel/
+│   ├── channel.hpp           // Channel base + types
+│   ├── reliable_ordered.cpp
+│   ├── reliable_unordered.cpp
+│   ├── unreliable.cpp
+│   └── unreliable_sequenced.cpp
+├── reliability/
+│   ├── sequence.hpp          // Sequence numbers, ack bits
+│   ├── replay.hpp            // Replay protection
+│   └── rtt.hpp               // RTT estimation
+├── fragment/
+│   └── fragment.cpp          // Split / reassemble
+├── crypto/
+│   ├── aead.hpp              // ChaCha20-Poly1305 / AES-256-GCM
+│   ├── crc32c.hpp            // Hardware-accelerated CRC32C
+│   └── random.hpp            // CSPRNG
+├── simd/
+│   ├── simd.hpp              // Dispatch table
+│   ├── simd_detect.cpp       // CPUID detection
+│   ├── simd_generic.cpp      // Scalar fallback
+│   ├── simd_sse42.cpp        // SSE4.2
+│   ├── simd_avx2.cpp         // AVX2
+│   └── simd_neon.cpp         // NEON
+├── server.cpp                // netudp_server_t implementation
+├── client.cpp                // netudp_client_t implementation
+└── api.cpp                   // extern "C" wrappers → C++ internals
+
+sdk/
+├── cpp/                      // C++ header-only wrapper (RAII, span, optional)
+│   └── include/netudp.hpp
+├── unreal/                   // UE5 plugin
+├── unity/                    // C# P/Invoke bindings
+└── godot/                    // GDExtension
+```
+
+### 3.5 API Boundary: C++ Internal ↔ C Public
+
+```cpp
+// src/api.cpp — thin extern "C" wrappers
+extern "C" {
+
+netudp_server_t * netudp_server_create(const char * addr, 
+                                        const netudp_server_config_t * cfg,
+                                        double time) {
+    // C config → C++ config
+    auto config = netudp::ServerConfig::from_c(*cfg);
+    
+    // C++ construction
+    auto * server = new (cfg->allocate_function(cfg->allocator_context, sizeof(netudp::Server)))
+        netudp::Server(addr, config, time);
+    
+    return reinterpret_cast<netudp_server_t *>(server);
+}
+
+void netudp_server_update(netudp_server_t * server, double time) {
+    reinterpret_cast<netudp::Server *>(server)->update(time);
+}
+
+int netudp_server_send(netudp_server_t * server, int client_index,
+                       int channel, const void * data, int bytes, int flags) {
+    return reinterpret_cast<netudp::Server *>(server)->send(
+        client_index, channel, 
+        std::span<const uint8_t>(static_cast<const uint8_t*>(data), bytes),
+        flags);
+}
+
+} // extern "C"
+```
+
+### 3.6 C++ Native API (for UzmiGames Engine / Unreal)
+
+```cpp
+// sdk/cpp/include/netudp.hpp — header-only C++ wrapper
+namespace netudp {
+
+class Server {
+    netudp_server_t * handle_;
+public:
+    Server(const char * addr, const ServerConfig& cfg, double time)
+        : handle_(netudp_server_create(addr, &cfg.to_c(), time)) {}
+    
+    ~Server() { if (handle_) netudp_server_destroy(handle_); }
+    
+    Server(Server&& o) noexcept : handle_(o.handle_) { o.handle_ = nullptr; }
+    Server& operator=(Server&& o) noexcept { std::swap(handle_, o.handle_); return *this; }
+    
+    // No copy
+    Server(const Server&) = delete;
+    Server& operator=(const Server&) = delete;
+    
+    void start(int max_clients) { netudp_server_start(handle_, max_clients); }
+    void update(double time) { netudp_server_update(handle_, time); }
+    
+    int send(int client, int channel, std::span<const uint8_t> data, int flags = 0) {
+        return netudp_server_send(handle_, client, channel, data.data(), (int)data.size(), flags);
+    }
+    
+    // Receive with RAII message release
+    std::vector<Message> receive(int client, int max = 64);
+    
+    // Stats
+    ConnectionStats connection_stats(int client);
+    
+    // Callbacks via std::function (safe — only called during update, not hot path)
+    void on_connect(std::function<void(int client, uint64_t id, std::span<const uint8_t> user_data)> cb);
+    void on_disconnect(std::function<void(int client, int reason)> cb);
+};
+
+// RAII message — automatically released when destroyed
+class Message {
+    netudp_message_t * msg_;
+public:
+    Message(netudp_message_t * m) : msg_(m) {}
+    ~Message() { if (msg_) netudp_message_release(msg_); }
+    Message(Message&& o) noexcept : msg_(o.msg_) { o.msg_ = nullptr; }
+    
+    std::span<const uint8_t> data() const { return {(uint8_t*)msg_->data, (size_t)msg_->size}; }
+    int channel() const { return msg_->channel; }
+    int client() const { return msg_->client_index; }
+    int64_t sequence() const { return msg_->message_number; }
+};
+
+} // namespace netudp
+```
+
+---
+
+## 4. Benchmark Framework
 
 ### 3.1 Design: Every Optimization Must Be Proven
 
@@ -237,7 +466,7 @@ SIMD comparison (ack_bits_scan, 32 bits):
 
 ---
 
-## 4. Layer Architecture
+## 5. Layer Architecture
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -290,7 +519,7 @@ SIMD comparison (ack_bits_scan, 32 bits):
 
 ---
 
-## 5. Connect Token System (from netcode.io)
+## 6. Connect Token System (from netcode.io)
 
 The authentication model follows netcode.io's proven connect token pattern exactly.
 
@@ -402,7 +631,7 @@ Multi-server fallback: if server N fails, client tries server N+1 from token.
 
 ---
 
-## 6. Channel System
+## 7. Channel System
 
 ### 4.1 Channel Types
 
@@ -451,7 +680,7 @@ UNRELIABLE_SEQUENCED → netc stateless (packets may be dropped)
 
 ---
 
-## 7. Reliability Engine
+## 8. Reliability Engine
 
 ### 5.1 Packet-Level Acknowledgment
 
@@ -503,7 +732,7 @@ struct netudp_replay_protection {
 
 ---
 
-## 8. Wire Format
+## 9. Wire Format
 
 ### 6.1 Multi-Frame Packet (from GNS)
 
@@ -578,7 +807,7 @@ Matches netcode.io's AAD scheme. The header is authenticated but not encrypted �
 
 ---
 
-## 9. Encryption
+## 10. Encryption
 
 ### 7.1 Algorithms
 
@@ -632,7 +861,7 @@ For LAN/development scenarios where encryption overhead is unwanted:
 
 ---
 
-## 10. Compression (via netc)
+## 11. Compression (via netc)
 
 ### 8.1 Integration
 
@@ -668,7 +897,7 @@ config.compression_level = 5;         // 0=fastest, 9=best ratio
 
 ---
 
-## 11. Bandwidth Control
+## 12. Bandwidth Control
 
 ### 9.1 Token Bucket (from Server5 WAF + GNS)
 
@@ -700,7 +929,7 @@ stats.queue_time_us            // How long data waits before being sent
 
 ---
 
-## 12. Connection Statistics (from GNS)
+## 13. Connection Statistics (from GNS)
 
 ```c
 typedef struct {
@@ -733,7 +962,7 @@ typedef struct {
 
 ---
 
-## 13. Public API
+## 14. Public API
 
 ### 11.1 Lifecycle
 
@@ -864,7 +1093,7 @@ int netudp_server_stats(netudp_server_t * server, netudp_server_stats_t * stats)
 
 ---
 
-## 14. Zero-GC Memory Model
+## 15. Zero-GC Memory Model
 
 ### 12.1 Zero-GC Guarantee
 
@@ -953,7 +1182,7 @@ All allocated once at start. Zero-alloc during runtime. Configurable per use cas
 
 ---
 
-## 15. Threading Model
+## 16. Threading Model
 
 **Single-threaded per instance. No internal locks.**
 
@@ -987,7 +1216,7 @@ while (running) {
 
 ---
 
-## 16. Network Simulator (from netcode.io)
+## 17. Network Simulator (from netcode.io)
 
 Built-in for testing. Configurable per-instance:
 
@@ -1002,7 +1231,7 @@ typedef struct {
 
 ---
 
-## 17. Packet Interfaces (for Game Server Implementation)
+## 18. Packet Interfaces (for Game Server Implementation)
 
 netudp is transport-only, but it provides clean interfaces so game servers can plug in packet handling, serialization, and dispatch without modifying the library.
 
@@ -1137,7 +1366,7 @@ void netudp_server_send_to_list(netudp_server_t * server, const int * client_ind
 
 ---
 
-## 18. SDK & Engine Integration
+## 19. SDK & Engine Integration
 
 ### 16.1 Target Engines
 
@@ -1301,7 +1530,7 @@ func _on_packet_received(client_index: int, channel: int, data: PackedByteArray)
 
 ---
 
-## 19. Implementation Phases
+## 20. Implementation Phases
 
 ### Phase 0: Project Setup
 - CMake + Zig CC build system
