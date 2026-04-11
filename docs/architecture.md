@@ -17,23 +17,23 @@ This architecture synthesizes the best patterns from six analyzed implementation
 
 ## 1. Design Principles
 
-1. **Zero allocation in hot path.** All per-packet processing uses pre-allocated buffer pools. No `malloc` after `netudp_server_start()`. Proven by Server1's `ConcurrentByteBufferPool` and GNS's internal allocators.
+1. **Zero-GC, zero allocation in hot path.** The entire library is designed around **zero garbage collection**. All memory is pre-allocated at init (`netudp_server_start`). No `malloc`, `free`, `new`, `delete`, or any allocation during `update()`, `send()`, or `receive()`. Every buffer, every connection slot, every fragment tracker, every compression context — all pre-allocated from fixed pools. This is not just "minimal allocation" — it is **zero**. The library can run indefinitely without ever touching the system allocator after initialization. This is critical for game servers processing 100K+ packets/second where even a single allocation can cause frame spikes.
 
-2. **Single-threaded per instance, no internal locks.** Each `netudp_server_t` / `netudp_client_t` is owned by one thread. The application calls `update()` to drive I/O. Matches netcode.io's explicit-time model and GNS's design. Multi-core scaling via multiple instances.
+2. **Single-threaded per instance, no internal locks.** Each `netudp_server_t` / `netudp_client_t` is owned by one thread. The application calls `update()` to drive I/O. Matches netcode.io's explicit-time model and GNS's design. Multi-core scaling via multiple instances. No mutexes, no atomics, no lock contention in the hot path.
 
-3. **Message-oriented, not stream-oriented.** Applications send discrete messages (like UDP), not byte streams (like TCP). The library handles reliability, ordering, and fragmentation transparently. Matches GNS's fundamental design and differs from TCP-style stream abstractions.
+3. **Message-oriented, not stream-oriented.** Applications send discrete messages (like UDP), not byte streams (like TCP). The library handles reliability, ordering, and fragmentation transparently. Matches GNS's fundamental design.
 
-4. **Encrypt everything by default.** All traffic after handshake uses AEAD encryption. No opt-out for production. CRC32C-only mode available for LAN/dev via compile flag. Lesson learned from Server1 (encryption disabled in prod) and MMORPG server (XOR "encryption").
+4. **SDK-first design.** The C API is designed to be bound from **any language and engine**: C++ (native), C# (Unity, .NET), GDScript/C++ (Godot), Blueprint/C++ (Unreal), Rust, Go, Python. All types are POD structs. All functions use C linkage. No callbacks require closures. Opaque handles instead of raw pointers in public API.
 
-5. **Compress before encrypt.** Optional netc compression applied to plaintext before AEAD encryption. Plaintext compresses far better than ciphertext. Server5 compressed after encrypt (less effective).
+5. **Packet interfaces for game servers.** The library provides clean callback interfaces and packet handler registration so game servers can plug in their own serialization, packet types, and game logic without modifying the transport. The transport is agnostic; the interfaces are not — they are purpose-built for game server architecture patterns.
 
-6. **Multi-frame packets.** A single UDP packet carries ack frames + data frames + stop-waiting, inspired by GNS's SNP wire format. Maximizes information per packet.
+6. **Encrypt everything by default.** All traffic after handshake uses AEAD encryption. CRC32C-only mode for LAN/dev via compile flag.
 
-7. **Nagle + explicit flush.** Small messages are batched automatically (Nagle timer). `NoNagle` flag bypasses per-message. `netudp_flush()` for immediate send. Combines Server1's proven batching with GNS's per-message control.
+7. **Compress before encrypt.** Optional netc compression on plaintext before AEAD. Stateful per reliable channel, stateless per unreliable channel.
 
-8. **Predictable memory.** All memory budgets are configured at creation time. The library never grows beyond initial allocation. `NETUDP_ERROR_NO_BUFFERS` is returned if exhausted (never falls back to malloc).
+8. **Multi-frame packets.** A single UDP packet carries ack + stop-waiting + data frames (GNS SNP pattern). Nagle timer with per-message bypass.
 
-9. **Pure C, zero dependencies.** Single dependency: vendored crypto primitives (ChaCha20-Poly1305 from libsodium subset or monocypher). Optional dependency: netc for compression. Builds with `zig cc` for trivial cross-compilation.
+9. **Pure C11, zero dependencies.** Vendored crypto (monocypher or libsodium subset). Optional netc for compression. Builds with `zig cc` for trivial cross-compilation to any target.
 
 ---
 
@@ -664,44 +664,92 @@ int netudp_server_stats(netudp_server_t * server, netudp_server_stats_t * stats)
 
 ---
 
-## 12. Memory Model
+## 12. Zero-GC Memory Model
 
-### 12.1 Custom Allocator (from netcode.io)
+### 12.1 Zero-GC Guarantee
 
-```c
-void * (*allocate_function)(void * context, size_t bytes);
-void   (*free_function)(void * context, void * pointer);
+**After `netudp_server_start()` returns, the library will NEVER call `malloc`, `free`, `realloc`, `calloc`, or any system allocator function.** This is a hard guarantee, not a best-effort.
+
+All memory is allocated in two phases:
+
+```
+Phase 1: CREATE (allocates)
+  netudp_server_create()  → allocates server struct
+  netudp_server_start()   → pre-allocates ALL pools, ALL per-connection state
+
+Phase 2: RUNTIME (zero-alloc)
+  netudp_server_update()  → uses only pre-allocated pools
+  netudp_server_send()    → acquires buffer from pool (O(1) free-list pop)
+  netudp_server_receive() → returns pointer into recv pool (zero-copy)
+  netudp_message_release()→ returns buffer to pool (O(1) free-list push)
+
+Phase 3: DESTROY (frees)
+  netudp_server_stop()    → returns all pool memory
+  netudp_server_destroy() → frees server struct
 ```
 
-### 12.2 Buffer Pool (from Server1)
+**Why this matters for game servers:**
+- No GC pauses (C# Unity, Java, Go all suffer from this)
+- No heap fragmentation over 24/7 server uptime
+- Deterministic frame timing (no allocation jitter)
+- Cache-friendly memory layout (pools are contiguous)
+- Safe to run on embedded/console platforms with no virtual memory
 
-Pre-allocated at `netudp_server_start()`:
+### 12.2 Custom Allocator (from netcode.io)
+
+The allocator is **only called during Phase 1 and Phase 3**. During runtime, all allocation goes through internal pools.
 
 ```c
-// Per-server pools:
-send_buffer_pool:     max_clients × 8 buffers × MTU_SIZE
-recv_buffer_pool:     max_clients × 4 buffers × MTU_SIZE
-fragment_pool:        max_clients × max_fragments × MTU_SIZE
-message_pool:         max_clients × 32 messages
+typedef struct {
+    void * context;
+    void * (*alloc)(void * context, size_t bytes);
+    void   (*free)(void * context, void * ptr);
+} netudp_allocator_t;
 ```
 
-O(1) acquire/release via free-list. Never falls back to `malloc`.
+This allows engines to route all netudp memory through their own allocator (Unreal's FMemory, Unity's UnsafeUtility, Godot's memalloc, etc.).
 
-### 12.3 Memory Budget (1024 connections)
+### 12.3 Pool Architecture
+
+```
+netudp_server_t
+  │
+  ├── packet_pool ──────── Fixed array of netudp_packet_t [max_clients × 16]
+  │                        O(1) acquire/release via intrusive free-list
+  │                        Each packet: MTU_SIZE bytes (1400)
+  │
+  ├── message_pool ─────── Fixed array of netudp_message_t [max_clients × 64]
+  │                        Returned to application via receive()
+  │                        Application calls release() to return to pool
+  │
+  ├── fragment_pool ────── Fixed array of netudp_fragment_t [max_clients × max_frags]
+  │                        Reassembly buffers for large messages
+  │
+  ├── connection_pool ──── Fixed array of netudp_connection_t [max_clients]
+  │                        Includes: crypto state, channel state, reliability state
+  │                        Slot reuse via generation counter
+  │
+  └── compression_pool ─── Fixed array of netc_ctx_t [max_clients × num_stateful_channels]
+                           (only if compression enabled)
+                           One stateful context per reliable ordered channel per connection
+```
+
+### 12.4 Memory Budget (1024 connections, 4 channels)
 
 | Component | Per-Connection | Total |
 |---|---|---|
 | Connection state + crypto | ~1 KB | 1 MB |
 | Reliability state (seq, acks, window) | ~3 KB | 3 MB |
-| Send buffer pool (8 × 1400B) | 11 KB | 11 MB |
-| Recv buffer pool (4 × 1400B) | 5.5 KB | 5.5 MB |
+| Packet pool (16 × 1400B) | 22 KB | 22 MB |
+| Message pool (64 × 64B descriptors) | 4 KB | 4 MB |
 | Fragment reassembly (64 KB max msg) | 64 KB | 64 MB |
 | Compression context (netc, optional) | 67 KB | 67 MB |
 | Channel state (4 channels) | ~2 KB | 2 MB |
-| **Total (no compression)** | | **~87 MB** |
-| **Total (with netc)** | | **~154 MB** |
+| **Total (no compression, no fragmentation)** | | **~32 MB** |
+| **Total (with fragmentation)** | | **~96 MB** |
+| **Total (with fragmentation + netc)** | | **~163 MB** |
 
-Fragmentation and compression dominate. Without large messages and compression: ~22 MB.
+All allocated once at start. Zero-alloc during runtime. Configurable per use case.
 
 ---
 
@@ -754,7 +802,313 @@ typedef struct {
 
 ---
 
-## 15. Implementation Phases
+## 15. Packet Interfaces (for Game Server Implementation)
+
+netudp is transport-only, but it provides clean interfaces so game servers can plug in packet handling, serialization, and dispatch without modifying the library.
+
+### 15.1 Packet Handler Interface
+
+```c
+/**
+ * Application registers handlers per packet type.
+ * The transport calls these when data arrives on a channel.
+ * Handler receives raw bytes — application deserializes.
+ */
+typedef void (*netudp_packet_handler_fn)(
+    void *            user_context,   // Application state (game world, player controller)
+    int               client_index,   // Which client sent this
+    int               channel,        // Which channel it arrived on
+    const uint8_t *   data,           // Payload pointer (into recv pool, zero-copy)
+    int               data_len,       // Payload length
+    uint64_t          sequence        // Message sequence number
+);
+
+/**
+ * Register a handler for a specific application packet type.
+ * packet_type: first byte(s) of payload, application-defined.
+ * If no handler registered, data is delivered via generic receive().
+ */
+void netudp_server_set_packet_handler(
+    netudp_server_t *       server,
+    uint16_t                packet_type,  // Application-defined type ID
+    netudp_packet_handler_fn handler,
+    void *                  user_context
+);
+```
+
+### 15.2 Connection Lifecycle Callbacks
+
+```c
+typedef struct {
+    /** Called when a new client connects. Return user_data to associate with this connection. */
+    void * (*on_connect)(void * context, int client_index, uint64_t client_id,
+                         const uint8_t user_data[256]);
+
+    /** Called when a client disconnects (timeout, graceful, or kicked). */
+    void (*on_disconnect)(void * context, int client_index, void * conn_user_data,
+                          int reason);
+
+    /** Called every server update tick. Use for game logic tied to network tick. */
+    void (*on_tick)(void * context, double time, double dt);
+
+    /** Application context passed to all callbacks. */
+    void * context;
+} netudp_server_callbacks_t;
+```
+
+### 15.3 Write Buffer Interface (Zero-Copy Send)
+
+```c
+/**
+ * Acquire a write buffer from the pool (zero-alloc).
+ * Write your packet data into it, then send.
+ * This is the Server1 BeginReliable/EndReliable pattern adapted for C.
+ */
+netudp_buffer_t * netudp_server_acquire_buffer(netudp_server_t * server);
+
+// Write helpers (application-level, in include/netudp/buffer.h)
+void netudp_buffer_write_u8(netudp_buffer_t * buf, uint8_t value);
+void netudp_buffer_write_u16(netudp_buffer_t * buf, uint16_t value);
+void netudp_buffer_write_u32(netudp_buffer_t * buf, uint32_t value);
+void netudp_buffer_write_u64(netudp_buffer_t * buf, uint64_t value);
+void netudp_buffer_write_f32(netudp_buffer_t * buf, float value);
+void netudp_buffer_write_varint(netudp_buffer_t * buf, int32_t value);
+void netudp_buffer_write_bytes(netudp_buffer_t * buf, const void * data, int len);
+void netudp_buffer_write_string(netudp_buffer_t * buf, const char * str, int max_len);
+
+// Read helpers (for deserialization)
+uint8_t  netudp_buffer_read_u8(netudp_buffer_t * buf);
+uint16_t netudp_buffer_read_u16(netudp_buffer_t * buf);
+uint32_t netudp_buffer_read_u32(netudp_buffer_t * buf);
+float    netudp_buffer_read_f32(netudp_buffer_t * buf);
+int32_t  netudp_buffer_read_varint(netudp_buffer_t * buf);
+int      netudp_buffer_read_bytes(netudp_buffer_t * buf, void * out, int max_len);
+int      netudp_buffer_read_string(netudp_buffer_t * buf, char * out, int max_len);
+
+// Send the buffer (returns it to pool after batching/sending)
+int netudp_server_send_buffer(netudp_server_t * server, int client_index,
+                              int channel, netudp_buffer_t * buf, int flags);
+```
+
+### 15.4 Example: Game Server Packet Handling
+
+```c
+// Application-defined packet types (NOT part of netudp)
+enum GamePacketType {
+    GAME_PKT_MOVE           = 0x01,
+    GAME_PKT_ATTACK         = 0x02,
+    GAME_PKT_CHAT           = 0x03,
+    GAME_PKT_ENTITY_UPDATE  = 0x10,
+    // ... game-specific
+};
+
+// Handler for movement packets
+void handle_move(void * ctx, int client, int ch, const uint8_t * data, int len, uint64_t seq) {
+    GameWorld * world = (GameWorld *)ctx;
+    netudp_buffer_t buf = { .data = (uint8_t*)data, .size = len, .position = 0 };
+
+    float x = netudp_buffer_read_f32(&buf);
+    float y = netudp_buffer_read_f32(&buf);
+    float z = netudp_buffer_read_f32(&buf);
+
+    game_world_move_player(world, client, x, y, z);
+}
+
+// Registration
+netudp_server_set_packet_handler(server, GAME_PKT_MOVE, handle_move, game_world);
+netudp_server_set_packet_handler(server, GAME_PKT_ATTACK, handle_attack, game_world);
+```
+
+### 15.5 Broadcast / Multicast Helpers
+
+```c
+/** Send to all connected clients on a channel. */
+void netudp_server_broadcast(netudp_server_t * server, int channel,
+                             const void * data, int bytes, int flags);
+
+/** Send to all clients except one (e.g., broadcast entity update to everyone except owner). */
+void netudp_server_broadcast_except(netudp_server_t * server, int except_client,
+                                    int channel, const void * data, int bytes, int flags);
+
+/** Send to a list of clients (e.g., players in same zone/area of interest). */
+void netudp_server_send_to_list(netudp_server_t * server, const int * client_indices,
+                                int count, int channel, const void * data, int bytes, int flags);
+```
+
+---
+
+## 16. SDK & Engine Integration
+
+### 16.1 Target Engines
+
+| Engine | Binding Language | Integration Pattern |
+|---|---|---|
+| **UzmiGames Custom Engine** | C (native) | Direct API calls |
+| **Unreal Engine 5** | C++ | Thin C++ wrapper over C API, `TSharedPtr` for lifetime |
+| **Unity** | C# (P/Invoke) | `[DllImport("netudp")]` flat C API, `NativeArray<byte>` for buffers |
+| **Godot 4** | C (GDExtension) | GDExtension C API, `PackedByteArray` for buffers |
+| **Rust** | Rust (FFI) | `extern "C"` bindings, `unsafe` wrapper with safe Rust API |
+| **Go** | Go (cgo) | `#cgo` directives, Go wrapper types |
+
+### 16.2 C API Design for FFI Compatibility
+
+All public types follow strict rules for bindability:
+
+```c
+// ✅ POD structs only (no function pointers in data types passed across FFI)
+typedef struct {
+    uint32_t ping_ms;
+    float    quality;
+} netudp_connection_stats_t;
+
+// ✅ Opaque handles (not raw pointers) for lifetime safety
+typedef struct netudp_server netudp_server_t;  // Forward declaration only
+
+// ✅ All functions use C linkage
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// ✅ Fixed-size arrays, not pointers-to-arrays
+int netudp_generate_connect_token(
+    ...,
+    uint8_t connect_token[2048]  // Fixed size, not uint8_t*
+);
+
+// ✅ Error codes as int return values (not exceptions, not errno)
+int netudp_server_send(...);  // Returns NETUDP_OK or NETUDP_ERROR_*
+
+// ✅ Callbacks use void* context (not closures/lambdas)
+void (*on_connect)(void * context, int client_index, ...);
+```
+
+### 16.3 Platform Libraries
+
+```
+netudp/
+├── lib/
+│   ├── win-x64/      netudp.dll, netudp.lib
+│   ├── win-arm64/    netudp.dll, netudp.lib
+│   ├── linux-x64/    libnetudp.so, libnetudp.a
+│   ├── linux-arm64/  libnetudp.so, libnetudp.a
+│   ├── macos-x64/    libnetudp.dylib, libnetudp.a
+│   ├── macos-arm64/  libnetudp.dylib, libnetudp.a
+│   ├── android-arm64/ libnetudp.so
+│   ├── ios-arm64/    libnetudp.a
+│   └── wasm/         netudp.wasm (WebRTC fallback, future)
+├── include/
+│   └── netudp/
+│       ├── netudp.h          // Core API (server, client, send, recv)
+│       ├── netudp_types.h    // All public types and constants
+│       ├── netudp_buffer.h   // Buffer read/write helpers
+│       ├── netudp_token.h    // Connect token generation
+│       └── netudp_config.h   // Compile-time configuration
+└── sdk/
+    ├── unreal/       // UE5 plugin (C++ wrapper + .uplugin)
+    ├── unity/        // Unity package (C# bindings + .asmdef)
+    ├── godot/        // GDExtension (C wrapper + .gdextension)
+    └── cpp/          // C++ header-only wrapper (RAII, std::span)
+```
+
+### 16.4 Unreal Engine Integration Example
+
+```cpp
+// NetudpSubsystem.h (UE5)
+UCLASS()
+class UNetudpSubsystem : public UGameInstanceSubsystem {
+    GENERATED_BODY()
+
+    netudp_server_t * Server = nullptr;
+
+    virtual void Initialize(FSubsystemCollectionBase& Collection) override {
+        netudp_init();
+        netudp_server_config_t Config = {};
+        netudp_default_server_config(&Config);
+        Config.allocate_function = FMemoryAllocator;  // Route to UE allocator
+        Server = netudp_server_create("0.0.0.0:7777", &Config, FPlatformTime::Seconds());
+        netudp_server_start(Server, 64);
+    }
+
+    virtual void Deinitialize() override {
+        netudp_server_destroy(Server);
+        netudp_term();
+    }
+
+    void Tick(float DeltaTime) {
+        netudp_server_update(Server, FPlatformTime::Seconds());
+        // Receive and process messages...
+    }
+};
+```
+
+### 16.5 Unity Integration Example
+
+```csharp
+// NetudpServer.cs (Unity)
+public class NetudpServer : IDisposable {
+    [DllImport("netudp")] static extern int netudp_init();
+    [DllImport("netudp")] static extern IntPtr netudp_server_create(string addr, ref ServerConfig cfg, double time);
+    [DllImport("netudp")] static extern void netudp_server_update(IntPtr server, double time);
+    [DllImport("netudp")] static extern int netudp_server_send(IntPtr server, int client,
+        int channel, byte[] data, int bytes, int flags);
+    // ... other bindings
+
+    IntPtr _server;
+
+    public void Start(int maxClients) {
+        netudp_init();
+        var cfg = ServerConfig.Default();
+        _server = netudp_server_create("0.0.0.0:7777", ref cfg, Time.realtimeSinceStartupAsDouble);
+        netudp_server_start(_server, maxClients);
+    }
+
+    // Called from MonoBehaviour.Update() — zero GC, no managed allocations
+    public void Tick() {
+        netudp_server_update(_server, Time.realtimeSinceStartupAsDouble);
+    }
+
+    public void Dispose() {
+        netudp_server_destroy(_server);
+        netudp_term();
+    }
+}
+```
+
+### 16.6 Godot Integration Example
+
+```gdscript
+# netudp_server.gd (Godot 4, GDExtension)
+extends Node
+
+var server: NetudpServer
+
+func _ready():
+    server = NetudpServer.new()
+    server.start("0.0.0.0:7777", 64)
+    server.connect("client_connected", _on_client_connected)
+    server.connect("client_disconnected", _on_client_disconnected)
+    server.connect("packet_received", _on_packet_received)
+
+func _process(delta):
+    server.update(Time.get_unix_time_from_system())
+
+func _on_packet_received(client_index: int, channel: int, data: PackedByteArray):
+    var packet_type = data.decode_u8(0)
+    match packet_type:
+        GamePacket.MOVE:
+            handle_move(client_index, data)
+```
+
+---
+
+## 17. Implementation Phases
+
+### Phase 0: Project Setup
+- CMake + Zig CC build system
+- Google Test harness
+- CI (GitHub Actions: Windows + Linux + macOS)
+- Public header structure (`include/netudp/*.h`)
+- Coding style, static analysis (clang-tidy)
 
 ### Phase 1: Foundation
 - Platform socket abstraction (Windows + Linux + macOS)
@@ -795,12 +1149,28 @@ typedef struct {
 - Per-channel statistics
 - Automatic rekeying
 
-### Phase 6: Optimization + Polish
+### Phase 6: Packet Interfaces + Game Server Support
+- Packet handler registration API
+- Connection lifecycle callbacks (on_connect, on_disconnect, on_tick)
+- Write buffer acquire/send (zero-copy pattern)
+- Buffer read/write helpers (u8, u16, u32, f32, varint, string)
+- Broadcast / multicast helpers
+- Example game server (echo, entity sync, chat)
+
+### Phase 7: Optimization + Polish
 - `recvmmsg`/`sendmmsg` batch I/O on Linux
 - Batch send/receive API
 - Network simulator
 - DSCP packet tagging
 - Memory layout optimization (cache-line alignment)
-- Benchmarking suite
-- Examples (echo server, chat, stress test)
-- Documentation
+- Benchmarking suite (pps, latency, memory)
+- Profiling under load (1000+ connections)
+
+### Phase 8: SDK & Engine Bindings
+- C++ header-only wrapper (RAII, std::span, std::function)
+- Unreal Engine 5 plugin (.uplugin + C++ subsystem)
+- Unity package (C# P/Invoke bindings + NativeArray integration)
+- Godot 4 GDExtension (C binding + GDScript-friendly API)
+- Cross-compile all platform libs via Zig CC
+- Platform testing matrix (Win/Linux/Mac × x64/ARM64)
+- SDK documentation and quick-start guides per engine
