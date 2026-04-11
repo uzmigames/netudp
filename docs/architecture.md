@@ -2,7 +2,7 @@
 
 ## 0. Design Provenance
 
-This architecture synthesizes the best patterns from six analyzed implementations:
+This architecture synthesizes the best patterns from seven analyzed implementations:
 
 | Source | What we adopt | Analysis |
 |---|---|---|
@@ -12,6 +12,7 @@ This architecture synthesizes the best patterns from six analyzed implementation
 | **netcode.io** (C, Glenn Fiedler) | Connect token system, challenge/response handshake, opaque API, custom allocator, network simulator | [analysis/netcode-io/](analysis/netcode-io/README.md) |
 | **Valve GNS** (C++, CS2/Dota2) | Ack vectors, multi-frame packets, Nagle batching, lanes with priority+weight, comprehensive stats, RTT from ack delay | [analysis/gns/](analysis/gns/README.md) |
 | **netc** (C, UzmiGames) | Purpose-built network packet compression (tANS, LZP, delta prediction, SIMD). Replaces LZ4. | [analysis/netc/](analysis/netc/README.md) |
+| **Unreal Engine 5.6** (C++, Fortnite) | Dual-layer reliability (packet + channel), stateless handshake with rotating secrets, DDoS escalation, packet simulation, per-channel reliable sequencing, sequence window overflow protection, handshake versioning | [analysis/unreal-engine/](analysis/unreal-engine/README.md) |
 
 ---
 
@@ -365,14 +366,14 @@ public:
 
 ## 4. Benchmark Framework
 
-### 3.1 Design: Every Optimization Must Be Proven
+### 4.1 Design: Every Optimization Must Be Proven
 
 ```
 Rule: No SIMD path is merged without a benchmark showing ≥ 20% improvement
       over the scalar fallback, measured on the target hardware class.
 ```
 
-### 3.2 Benchmark Categories
+### 4.2 Benchmark Categories
 
 | Category | What it measures | Target metric |
 |---|---|---|
@@ -389,7 +390,7 @@ Rule: No SIMD path is merged without a benchmark showing ≥ 20% improvement
 | **Memory bandwidth** | Sustained packet throughput vs memory bottleneck | Identify ceiling |
 | **Scalability** | PPS as function of connection count (1, 10, 100, 1000) | Linear degradation |
 
-### 3.3 Benchmark Infrastructure
+### 4.3 Benchmark Infrastructure
 
 ```
 bench/
@@ -408,7 +409,7 @@ bench/
 └── bench_simd_compare.c       // Side-by-side: generic vs SSE vs AVX vs NEON
 ```
 
-### 3.4 CI Benchmark Regression
+### 4.4 CI Benchmark Regression
 
 ```yaml
 # .github/workflows/benchmark.yml
@@ -417,7 +418,7 @@ bench/
 # Reports results as PR comment with tables
 ```
 
-### 3.5 Hardware Targets
+### 4.5 Hardware Targets
 
 | Platform | CPU | Expected PPS (64B, encrypted) |
 |---|---|---|
@@ -427,7 +428,7 @@ bench/
 | Raspberry Pi 4 | Cortex-A72 | ≥ 200K PPS |
 | Steam Deck | AMD Zen 2 APU | ≥ 500K PPS |
 
-### 3.6 Reporting Format
+### 4.6 Reporting Format
 
 ```
 === netudp benchmark v0.1.0 ===
@@ -523,7 +524,7 @@ SIMD comparison (ack_bits_scan, 32 bits):
 
 The authentication model follows netcode.io's proven connect token pattern exactly.
 
-### 3.1 Architecture
+### 6.1 Architecture
 
 ```
 ┌──────────────┐      HTTPS       ┌──────────────┐
@@ -539,7 +540,7 @@ The authentication model follows netcode.io's proven connect token pattern exact
 └──────────────┘                  └──────────────┘
 ```
 
-### 3.2 Connect Token (2048 bytes)
+### 6.2 Connect Token (2048 bytes)
 
 **Public portion (readable by client):**
 ```
@@ -568,7 +569,7 @@ The authentication model follows netcode.io's proven connect token pattern exact
 <zero pad to 1024 bytes>
 ```
 
-### 3.3 Connection Handshake (4-step, from netcode.io)
+### 6.3 Connection Handshake (4-step, from netcode.io)
 
 ```
 Client                                     Server
@@ -609,7 +610,7 @@ Client                                     Server
 - Token HMAC tracked to prevent reuse from different IPs
 - Token bucket rate limit per source IP before token processing
 
-### 3.4 Client State Machine (from netcode.io)
+### 6.4 Client State Machine (from netcode.io)
 
 ```
 Error states (negative):
@@ -629,11 +630,56 @@ Normal states:
 
 Multi-server fallback: if server N fails, client tries server N+1 from token.
 
+### 6.5 Handshake Versioning (from UE5)
+
+The version string in the connect token AAD (`"NETUDP 1.00\0"`) serves as a protocol version. If the protocol evolves:
+
+```cpp
+// Version history:
+// "NETUDP 1.00" — initial protocol
+// "NETUDP 1.01" — added feature X (backward compatible)
+// "NETUDP 2.00" — breaking change (incompatible with 1.x)
+```
+
+UE5 uses an `EHandshakeVersion` enum with explicit compatibility breaks. netudp embeds the version in AAD so mismatched clients fail at AEAD decryption (clean, no ambiguity).
+
+### 6.6 DDoS Protection (UE5-inspired escalation + Server5 token bucket)
+
+Dual-layer DDoS protection:
+
+**Layer 1: Per-IP token bucket (before token validation)**
+```cpp
+// Pre-connection: rate limit ALL incoming packets per source IP
+// Prevents resource exhaustion from connect token flood
+static constexpr int RATE_LIMIT_PACKETS_PER_SEC = 60;
+static constexpr int RATE_LIMIT_BURST = 10;
+```
+
+**Layer 2: Escalating severity (from UE5 FDDoSDetection)**
+```cpp
+enum class DDoSSeverity : uint8_t {
+    None    = 0,  // Normal operation
+    Low     = 1,  // Elevated bad packet rate — increase logging
+    Medium  = 2,  // Drop unverified packets faster, reduce processing budget
+    High    = 3,  // Accept only packets from established connections
+    Critical= 4,  // Emergency: reject all new connections
+};
+
+struct DDoSState {
+    int32_t bad_packets_per_sec_threshold;
+    int32_t packet_limit_per_frame;
+    int32_t packet_time_limit_ms_per_frame;
+    int32_t cooloff_time_sec;
+};
+```
+
+The server tracks bad packet counters (failed AEAD, expired tokens, duplicate tokens, invalid sequence) and auto-escalates severity. Each level restricts processing further. Auto-cooloff when attack subsides.
+
 ---
 
 ## 7. Channel System
 
-### 4.1 Channel Types
+### 7.1 Channel Types
 
 | Channel Type | Ordering | Reliability | Typical Use |
 |---|---|---|---|
@@ -642,7 +688,7 @@ Multi-server fallback: if server N fails, client tries server N+1 from token.
 | `NETUDP_CHANNEL_RELIABLE_ORDERED` | Strict | ACK + retransmit | RPCs, commands, chat |
 | `NETUDP_CHANNEL_RELIABLE_UNORDERED` | None | ACK + retransmit | Events, asset requests |
 
-### 4.2 Channel Configuration
+### 7.2 Channel Configuration
 
 ```c
 typedef struct {
@@ -661,7 +707,7 @@ Channel 2: RELIABLE_UNORDERED,     priority=1, weight=1, nagle=5000us  (events)
 Channel 3: UNRELIABLE_SEQUENCED,   priority=2, weight=1, nagle=0       (latest-state)
 ```
 
-### 4.3 Priority + Weight Scheduling (from GNS)
+### 7.3 Priority + Weight Scheduling (from GNS)
 
 ```
 Priority 0 (control): always sent first when bandwidth available
@@ -669,7 +715,7 @@ Priority 1 (game):    3/4 bandwidth to unreliable (weight=3), 1/4 to reliable (w
 Priority 2 (bulk):    only when higher priorities are empty
 ```
 
-### 4.4 Per-Channel Compression (via netc)
+### 7.4 Per-Channel Compression (via netc)
 
 ```
 RELIABLE_ORDERED     → netc stateful  (delta + adaptive — best ratio)
@@ -680,61 +726,111 @@ UNRELIABLE_SEQUENCED → netc stateless (packets may be dropped)
 
 ---
 
-## 8. Reliability Engine
+## 8. Dual-Layer Reliability Engine
 
-### 5.1 Packet-Level Acknowledgment
+Inspired by UE5's battle-tested dual-layer approach (Fortnite scale), combined with GNS's ack delay and netcode.io's replay protection.
 
-Every data packet carries piggybacked ack information (from GNS/netcode.io hybrid):
+### 8.1 Layer 1 — Packet-Level Acknowledgment
 
-```c
-typedef struct {
-    uint16_t sequence;       // This packet's sequence number
+Every data packet carries piggybacked ack information. This layer tracks which **packets** arrived, regardless of what they contained.
+
+```cpp
+struct PacketHeader {
+    uint16_t sequence;       // This packet's sequence number (wraps at 65535)
     uint16_t ack;            // Latest received sequence from remote
     uint32_t ack_bits;       // Bitmask: bit N = received (ack - N - 1)
     uint16_t ack_delay_us;   // Microseconds since receiving 'ack' (for RTT, from GNS)
-} netudp_packet_header_t;
+};
 ```
 
-**Every packet is an implicit ping.** The `ack_delay_us` field means no separate ping/pong packets are needed (GNS pattern). RTT is continuously measured from every ack.
+**Every packet is an implicit ping.** The `ack_delay_us` field eliminates separate ping/pong (GNS pattern). RTT is continuously measured from every ack.
 
-### 5.2 RTT Estimation (TCP-style SRTT)
+**Sequence window overflow protection (from UE5):** If `outstanding_packets >= 256`, the sender blocks until acks arrive. This prevents unbounded packet loss from overwhelming the ack window. Keepalive packets (empty with ack header) advance the window during idle periods.
+
+### 8.2 Layer 2 — Per-Channel Message Reliability
+
+Each reliable channel has its own independent sequence counter and retransmission buffer. This is the UE5 pattern — the sender knows which **messages** on which **channels** were in lost packets, and retransmits only those messages.
+
+```cpp
+// Per reliable channel:
+struct ChannelReliabilityState {
+    uint16_t send_sequence;          // Next message sequence to assign
+    uint16_t recv_sequence;          // Next expected from remote
+    uint16_t oldest_unacked;         // Oldest message awaiting ack
+
+    // Outgoing: messages awaiting ack (ring buffer, pre-allocated)
+    FixedRingBuffer<SentMessage, 512> sent_buffer;
+
+    // Incoming: out-of-order messages waiting for gap fill (for ordered channels)
+    FixedRingBuffer<ReceivedMessage, 512> recv_buffer;
+};
+```
+
+**Why dual-layer is better than single-layer:**
+- Packet-level ack tells the sender which packets arrived
+- Channel-level tracking tells which messages need retransmit
+- Lost packet → only the specific messages in that packet are retransmitted (not all pending)
+- Different channels can have different messages in the same packet
+
+### 8.3 Fragment-Level Retransmission (improvement over UE5)
+
+UE5 retransmits the **entire bunch** if any partial fragment is lost. netudp retransmits **only the lost fragments**:
+
+```cpp
+struct FragmentTracker {
+    uint16_t message_id;
+    uint8_t  total_fragments;
+    uint8_t  received_mask[32];  // Bitmask: up to 256 fragments
+    double   last_recv_time;
+
+    bool is_complete() const;
+    int  next_missing_fragment() const;  // SIMD: _tzcnt on mask
+};
+```
+
+This is significantly more efficient for large messages (entity snapshots, asset data).
+
+### 8.4 RTT Estimation (TCP-style SRTT)
 
 ```
 sample_rtt = (now - send_time_of_acked_packet) - ack_delay_us
 srtt       = (1 - α) × srtt + α × sample_rtt           (α = 0.125)
 rttvar     = (1 - β) × rttvar + β × |srtt - sample_rtt| (β = 0.25)
 rto        = srtt + 4 × rttvar
+rto_min    = 100ms     // Floor
+rto_max    = 2000ms    // Ceiling
 ```
 
-### 5.3 Reliable Retransmission
+### 8.5 Retransmission Strategy
 
-- Packets not acknowledged within `rto` are retransmitted
-- Exponential backoff: `rto × 2^retry_count` up to `rto_max` (default: 2000ms)
-- Maximum retries: 10 (from Server5, vs Server1's 30)
-- After max retries: message dropped, connection quality tracked
+- Messages not acknowledged within `rto` are retransmitted
+- Exponential backoff: `rto × 2^retry_count` up to `rto_max`
+- Maximum retries: 10 (from Server5). After max: message dropped, quality tracked
+- **Fragment-level retransmit**: only lost fragments, not whole message (improvement over UE5)
+- Retransmit in next available packet (not dedicated retransmit packet)
 
-### 5.4 Stop-Waiting (from GNS)
+### 8.6 Stop-Waiting (from GNS)
 
-Periodically, a stop-waiting value is sent: "I have received all packets before sequence X." This allows the sender to stop tracking old packets and shrink the ack window.
+Periodically, a stop-waiting value is sent: "I have received all packets before sequence X." Allows sender to stop tracking old packets and shrink the ack window.
 
-### 5.5 Replay Protection (from netcode.io)
+### 8.7 Replay Protection (from netcode.io)
 
-```c
-#define NETUDP_REPLAY_BUFFER_SIZE 256
+```cpp
+static constexpr int REPLAY_BUFFER_SIZE = 256;
 
-struct netudp_replay_protection {
+struct ReplayProtection {
     uint64_t most_recent_sequence;
     uint64_t received_packet[256];  // Stores actual sequence at each index
 };
 ```
 
-256-entry window using netcode.io's `uint64_t` array approach (more robust than bitmask).
+256-entry window using netcode.io's `uint64_t` array approach (more robust than UE5's bitmask for high packet loss scenarios).
 
 ---
 
 ## 9. Wire Format
 
-### 6.1 Multi-Frame Packet (from GNS)
+### 9.1 Multi-Frame Packet (from GNS)
 
 A single UDP packet contains multiple **frames**. This maximizes information density.
 
@@ -763,7 +859,7 @@ A single UDP packet contains multiple **frames**. This maximizes information den
 └──────────────────────────────────────────────────────┘
 ```
 
-### 6.2 Frame Types
+### 9.2 Frame Types
 
 ```
 0x01  ACK frame         — piggybacked acknowledgments
@@ -774,7 +870,7 @@ A single UDP packet contains multiple **frames**. This maximizes information den
 0x06  Disconnect        — graceful close (sent redundantly)
 ```
 
-### 6.3 Packet Types (Unencrypted, Handshake Only)
+### 9.3 Packet Types (Unencrypted, Handshake Only)
 
 ```
 0x00  CONNECTION_REQUEST    — 1078 bytes, contains encrypted connect token
@@ -783,7 +879,7 @@ A single UDP packet contains multiple **frames**. This maximizes information den
 0x03  CONNECTION_RESPONSE   — challenge echo
 ```
 
-### 6.4 Variable-Length Sequence (from netcode.io)
+### 9.4 Variable-Length Sequence (from netcode.io)
 
 ```
 Prefix byte high 4 bits = number of sequence bytes (1-8)
@@ -795,7 +891,7 @@ Written as: 0xE8, 0x03 (little-endian)
 
 Saves 6 bytes per packet for the first ~65K packets.
 
-### 6.5 Associated Data for AEAD
+### 9.5 Associated Data for AEAD
 
 ```
 [version info]   13 bytes    "NETUDP 1.00\0"
@@ -809,7 +905,7 @@ Matches netcode.io's AAD scheme. The header is authenticated but not encrypted �
 
 ## 10. Encryption
 
-### 7.1 Algorithms
+### 10.1 Algorithms
 
 | Purpose | Algorithm | Source |
 |---|---|---|
@@ -819,7 +915,7 @@ Matches netcode.io's AAD scheme. The header is authenticated but not encrypted �
 | Key exchange | Pre-shared via connect token | netcode.io |
 | Optional compile-time | AES-256-GCM (for AES-NI platforms) | GNS |
 
-### 7.2 Nonce Construction (from netcode.io)
+### 10.2 Nonce Construction (from netcode.io)
 
 ```c
 // 12-byte nonce = sequence number zero-padded to 96 bits
@@ -829,14 +925,14 @@ memcpy(nonce, &sequence, sizeof(uint64_t));  // LE
 
 Deterministic — no random generation needed. Unique because sequence never repeats.
 
-### 7.3 Key Management
+### 10.3 Key Management
 
 - **Client → Server key** and **Server → Client key** are separate (from connect token)
 - Prevents reflection attacks
 - Keys derived offline by web backend, embedded in connect token
 - No online key exchange needed (cheaper than ECDH)
 
-### 7.4 Automatic Rekeying (from Server5)
+### 10.4 Automatic Rekeying (from Server5)
 
 ```c
 #define NETUDP_REKEY_BYTES_THRESHOLD  (1ULL << 30)  // 1 GB
@@ -848,7 +944,7 @@ Deterministic — no random generation needed. Unique because sequence never rep
 // 3. Both sides derive independently (deterministic)
 ```
 
-### 7.5 CRC32C Fast Path (from Server1)
+### 10.5 CRC32C Fast Path (from Server1)
 
 For LAN/development scenarios where encryption overhead is unwanted:
 
@@ -863,7 +959,7 @@ For LAN/development scenarios where encryption overhead is unwanted:
 
 ## 11. Compression (via netc)
 
-### 8.1 Integration
+### 11.1 Integration
 
 ```
 Application message
@@ -878,7 +974,7 @@ AEAD encrypt(compressed payload) → ciphertext + tag
 UDP sendto()
 ```
 
-### 8.2 Performance (netc vs LZ4 vs nothing)
+### 11.2 Performance (netc vs LZ4 vs nothing)
 
 | Packet Size | No compression | LZ4 | **netc** | netc savings |
 |---|---|---|---|---|
@@ -887,7 +983,7 @@ UDP sendto()
 | 128 bytes | 128B | 95B | **73B** | 43% |
 | 256 bytes | 256B | 122B | **85B** | 67% |
 
-### 8.3 Configuration
+### 11.3 Configuration
 
 ```c
 netudp_config_t config = netudp_default_config();
@@ -899,7 +995,7 @@ config.compression_level = 5;         // 0=fastest, 9=best ratio
 
 ## 12. Bandwidth Control
 
-### 9.1 Token Bucket (from Server5 WAF + GNS)
+### 12.1 Token Bucket (from Server5 WAF + GNS)
 
 ```c
 typedef struct {
@@ -910,21 +1006,37 @@ typedef struct {
 } netudp_token_bucket_t;
 ```
 
-### 9.2 Congestion Control
+### 12.2 Per-Connection Bandwidth (from UE5 QueuedBits pattern)
 
-Loss-based congestion avoidance:
+Each connection tracks `queued_bits`. Per tick:
+```cpp
+allowed_bits += (send_rate_bytes_per_sec * 8) * delta_time;
+queued_bits -= allowed_bits;
+if (queued_bits > 0) {
+    // Bandwidth exceeded — defer remaining sends to next tick
+}
+```
+
+This is UE5's `QueuedBits` / `CurrentNetSpeed` pattern, which provides smooth bandwidth distribution per connection without global contention.
+
+### 12.3 Congestion Control (AIMD — improvement over UE5)
+
+UE5 has no active congestion control (just token bucket). netudp adds AIMD (Additive Increase, Multiplicative Decrease):
+
 - Track packet loss rate from ack bitmask
-- Loss > 5%: reduce send rate by 25%
-- Loss < 1% for 10 RTTs: increase send rate by 10% (up to configured max)
+- **Multiplicative Decrease:** Loss > 5% → reduce send rate by 25%
+- **Additive Increase:** Loss < 1% for 10 RTTs → increase send rate by 10% (up to configured max)
 - Minimum rate: 32 KB/s (heartbeats + essential data)
+- Rate changes are smooth (exponential moving average, not step changes)
 
-### 9.3 Send Rate Estimation (from GNS)
+### 12.4 Send Rate Estimation (from GNS)
 
 The library estimates channel capacity and exposes it in statistics:
 
-```c
-stats.send_rate_bytes_per_sec  // Estimated capacity
+```cpp
+stats.send_rate_bytes_per_sec  // Estimated usable capacity
 stats.queue_time_us            // How long data waits before being sent
+stats.congestion_window_bytes  // Current CWND
 ```
 
 ---
@@ -964,7 +1076,7 @@ typedef struct {
 
 ## 14. Public API
 
-### 11.1 Lifecycle
+### 14.1 Lifecycle
 
 ```c
 // Initialize / terminate (global, once)
@@ -986,7 +1098,7 @@ void              netudp_client_disconnect(netudp_client_t * client);
 void              netudp_client_destroy(netudp_client_t * client);
 ```
 
-### 11.2 Send / Receive
+### 14.2 Send / Receive
 
 ```c
 // Send (per connection, per channel, with flags)
@@ -1016,7 +1128,7 @@ void netudp_server_flush(netudp_server_t * server, int client_index);
 void netudp_client_flush(netudp_client_t * client);
 ```
 
-### 11.3 Send Flags (from GNS)
+### 14.3 Send Flags (from GNS)
 
 ```c
 #define NETUDP_SEND_UNRELIABLE       0   // Fire-and-forget (default)
@@ -1025,7 +1137,7 @@ void netudp_client_flush(netudp_client_t * client);
 #define NETUDP_SEND_NO_DELAY         4   // Skip Nagle + send immediately
 ```
 
-### 11.4 Messages
+### 14.4 Messages
 
 ```c
 typedef struct {
@@ -1040,7 +1152,7 @@ typedef struct {
 } netudp_message_t;
 ```
 
-### 11.5 Connect Token Generation (from netcode.io)
+### 14.5 Connect Token Generation (from netcode.io)
 
 ```c
 int netudp_generate_connect_token(
@@ -1056,7 +1168,7 @@ int netudp_generate_connect_token(
 );
 ```
 
-### 11.6 Configuration
+### 14.6 Configuration
 
 ```c
 typedef struct {
@@ -1076,7 +1188,7 @@ typedef struct {
 } netudp_server_config_t;
 ```
 
-### 11.7 Statistics & Diagnostics
+### 14.7 Statistics & Diagnostics
 
 ```c
 // Per-connection stats
@@ -1095,7 +1207,7 @@ int netudp_server_stats(netudp_server_t * server, netudp_server_stats_t * stats)
 
 ## 15. Zero-GC Memory Model
 
-### 12.1 Zero-GC Guarantee
+### 15.1 Zero-GC Guarantee
 
 **After `netudp_server_start()` returns, the library will NEVER call `malloc`, `free`, `realloc`, `calloc`, or any system allocator function.** This is a hard guarantee, not a best-effort.
 
@@ -1124,7 +1236,7 @@ Phase 3: DESTROY (frees)
 - Cache-friendly memory layout (pools are contiguous)
 - Safe to run on embedded/console platforms with no virtual memory
 
-### 12.2 Custom Allocator (from netcode.io)
+### 15.2 Custom Allocator (from netcode.io)
 
 The allocator is **only called during Phase 1 and Phase 3**. During runtime, all allocation goes through internal pools.
 
@@ -1138,7 +1250,7 @@ typedef struct {
 
 This allows engines to route all netudp memory through their own allocator (Unreal's FMemory, Unity's UnsafeUtility, Godot's memalloc, etc.).
 
-### 12.3 Pool Architecture
+### 15.3 Pool Architecture
 
 ```
 netudp_server_t
@@ -1163,7 +1275,7 @@ netudp_server_t
                            One stateful context per reliable ordered channel per connection
 ```
 
-### 12.4 Memory Budget (1024 connections, 4 channels)
+### 15.4 Memory Budget (1024 connections, 4 channels)
 
 | Component | Per-Connection | Total |
 |---|---|---|
@@ -1216,18 +1328,23 @@ while (running) {
 
 ---
 
-## 17. Network Simulator (from netcode.io)
+## 17. Network Simulator (netcode.io + UE5)
 
-Built-in for testing. Configurable per-instance:
+Built-in for testing and development. Configurable per-instance. Combines netcode.io's clean API with UE5's full `FPacketSimulationSettings`.
 
-```c
-typedef struct {
-    float latency_ms;        // Added latency
-    float jitter_ms;         // Random ± jitter
-    float packet_loss_pct;   // 0..100
-    float duplicate_pct;     // 0..100
-} netudp_network_simulator_config_t;
+```cpp
+struct NetworkSimulatorConfig {
+    float latency_ms       = 0.0f;   // Added one-way latency (constant component)
+    float jitter_ms        = 0.0f;   // Random ± jitter added to latency
+    float packet_loss_pct  = 0.0f;   // 0..100 chance to drop outgoing packet
+    float duplicate_pct    = 0.0f;   // 0..100 chance to duplicate outgoing packet
+    float out_of_order_pct = 0.0f;   // 0..100 chance to reorder with adjacent (from UE5)
+    float incoming_lag_min = 0.0f;   // Min additional receive delay (from UE5)
+    float incoming_lag_max = 0.0f;   // Max additional receive delay (from UE5)
+};
 ```
+
+**Essential for testing:** Reliability, retransmission, fragment reassembly, congestion control, and connection timeout logic cannot be properly tested without simulated adverse conditions. CI tests run with various simulator profiles (lossy WiFi, high-latency satellite, burst loss).
 
 ---
 
@@ -1235,7 +1352,7 @@ typedef struct {
 
 netudp is transport-only, but it provides clean interfaces so game servers can plug in packet handling, serialization, and dispatch without modifying the library.
 
-### 15.1 Packet Handler Interface
+### 18.1 Packet Handler Interface
 
 ```c
 /**
@@ -1265,7 +1382,7 @@ void netudp_server_set_packet_handler(
 );
 ```
 
-### 15.2 Connection Lifecycle Callbacks
+### 18.2 Connection Lifecycle Callbacks
 
 ```c
 typedef struct {
@@ -1285,7 +1402,7 @@ typedef struct {
 } netudp_server_callbacks_t;
 ```
 
-### 15.3 Write Buffer Interface (Zero-Copy Send)
+### 18.3 Write Buffer Interface (Zero-Copy Send)
 
 ```c
 /**
@@ -1319,7 +1436,7 @@ int netudp_server_send_buffer(netudp_server_t * server, int client_index,
                               int channel, netudp_buffer_t * buf, int flags);
 ```
 
-### 15.4 Example: Game Server Packet Handling
+### 18.4 Example: Game Server Packet Handling
 
 ```c
 // Application-defined packet types (NOT part of netudp)
@@ -1348,7 +1465,7 @@ netudp_server_set_packet_handler(server, GAME_PKT_MOVE, handle_move, game_world)
 netudp_server_set_packet_handler(server, GAME_PKT_ATTACK, handle_attack, game_world);
 ```
 
-### 15.5 Broadcast / Multicast Helpers
+### 18.5 Broadcast / Multicast Helpers
 
 ```c
 /** Send to all connected clients on a channel. */
@@ -1368,7 +1485,7 @@ void netudp_server_send_to_list(netudp_server_t * server, const int * client_ind
 
 ## 19. SDK & Engine Integration
 
-### 16.1 Target Engines
+### 19.1 Target Engines
 
 | Engine | Binding Language | Integration Pattern |
 |---|---|---|
@@ -1379,7 +1496,7 @@ void netudp_server_send_to_list(netudp_server_t * server, const int * client_ind
 | **Rust** | Rust (FFI) | `extern "C"` bindings, `unsafe` wrapper with safe Rust API |
 | **Go** | Go (cgo) | `#cgo` directives, Go wrapper types |
 
-### 16.2 C API Design for FFI Compatibility
+### 19.2 C API Design for FFI Compatibility
 
 All public types follow strict rules for bindability:
 
@@ -1411,7 +1528,7 @@ int netudp_server_send(...);  // Returns NETUDP_OK or NETUDP_ERROR_*
 void (*on_connect)(void * context, int client_index, ...);
 ```
 
-### 16.3 Platform Libraries
+### 19.3 Platform Libraries
 
 ```
 netudp/
@@ -1439,7 +1556,7 @@ netudp/
     └── cpp/          // C++ header-only wrapper (RAII, std::span)
 ```
 
-### 16.4 Unreal Engine Integration Example
+### 19.4 Unreal Engine Integration Example
 
 ```cpp
 // NetudpSubsystem.h (UE5)
@@ -1470,7 +1587,7 @@ class UNetudpSubsystem : public UGameInstanceSubsystem {
 };
 ```
 
-### 16.5 Unity Integration Example
+### 19.5 Unity Integration Example
 
 ```csharp
 // NetudpServer.cs (Unity)
@@ -1503,7 +1620,7 @@ public class NetudpServer : IDisposable {
 }
 ```
 
-### 16.6 Godot Integration Example
+### 19.6 Godot Integration Example
 
 ```gdscript
 # netudp_server.gd (Godot 4, GDExtension)
