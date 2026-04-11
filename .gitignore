@@ -24,6 +24,28 @@ logs/
 temp/
 tmp/
 
+# C/C++ build artifacts
+build/
+build-*/
+out/
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.exp
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+.zig-cache/
+zig-out/
+
 CLAUDE.local.md
 .rulebook/backup/
 .rulebook/handoff/_pending.md
