@@ -35,9 +35,209 @@ This architecture synthesizes the best patterns from six analyzed implementation
 
 9. **Pure C11, zero dependencies.** Vendored crypto (monocypher or libsodium subset). Optional netc for compression. Builds with `zig cc` for trivial cross-compilation to any target.
 
+10. **SIMD everywhere, not just crypto.** Every subsystem that touches data in bulk uses SIMD intrinsics with runtime dispatch: CRC32C, AEAD, buffer copy, ack bitmask scan, fragment reassembly, packet batching, statistics accumulation. Scalar fallback always available. Targets: SSE4.2, AVX2 (x86-64), NEON (ARM64), WASM SIMD (future). The goal is to process the maximum number of packets per CPU cycle.
+
+11. **Benchmark-driven development.** Every performance-critical path has a dedicated micro-benchmark. No optimization is accepted without measured proof. Regression benchmarks run in CI on every commit. Target metrics are defined upfront and tracked against hardware baselines.
+
 ---
 
-## 2. Layer Architecture
+## 2. SIMD Architecture
+
+### 2.1 Runtime Dispatch
+
+```c
+// Detected once at netudp_init(), stored globally
+typedef enum {
+    NETUDP_SIMD_GENERIC = 0,   // Scalar fallback (always available)
+    NETUDP_SIMD_SSE42   = 1,   // x86-64: SSE4.2 + POPCNT
+    NETUDP_SIMD_AVX2    = 2,   // x86-64: AVX2 + BMI2
+    NETUDP_SIMD_NEON    = 3,   // ARM64: NEON + optional CRC
+    NETUDP_SIMD_AVX512  = 4,   // x86-64: AVX-512 (future)
+} netudp_simd_level_t;
+
+// Query at runtime
+netudp_simd_level_t netudp_simd_level(void);
+```
+
+Detection via CPUID (x86) or compile-time (ARM NEON is baseline on ARM64). Function pointers set once at init — zero overhead dispatch after that.
+
+### 2.2 SIMD Application Map
+
+Every subsystem that benefits from SIMD has vectorized implementations:
+
+| Subsystem | Operation | Generic | SSE4.2 | AVX2 | NEON |
+|---|---|---|---|---|---|
+| **CRC32C** | Packet integrity checksum | Slicing-by-16 table | `_mm_crc32_u64` | Same (no AVX2 benefit) | `__crc32cd` (ARMv8 CRC) |
+| **ChaCha20** | Stream cipher (AEAD) | Scalar quarter-round | `_mm_shuffle_epi32` | 4 blocks parallel `_mm256_*` | `vextq_u32` |
+| **Poly1305** | MAC (AEAD tag) | 130-bit scalar | `_mm_mul_epu32` | `_mm256_mul_epu32` | `vmull_u32` |
+| **Buffer memcpy** | Packet copy to/from pool | `memcpy` loop | `_mm_stream_si128` (NT) | `_mm256_stream_si256` (NT) | `vst1q_u8` |
+| **Buffer memset** | Pool initialization, zero-fill | `memset` loop | `_mm_stream_si128` | `_mm256_stream_si256` | `vst1q_u8` |
+| **Ack bitmask scan** | Find unacked packets for retransmit | Bit-by-bit loop | `_mm_popcnt_u64` + `_tzcnt_u64` | Same + `_pdep_u64` | `vclz_u32` |
+| **Replay window check** | Scan 256-entry uint64 array | Linear scan | `_mm_cmpeq_epi64` (2x parallel) | `_mm256_cmpeq_epi64` (4x) | `vceqq_u64` |
+| **Fragment bitmask** | Track received fragments | Scalar bit ops | `_mm_popcnt_u64` | Same | `vcntq_u8` |
+| **VarInt encode/decode** | Compact integer serialization | Byte-by-byte | `_mm_lzcnt_u32` for size | `_lzcnt_u32` | `vclzq_u32` |
+| **Packet batch** | Copy multiple packets to sendmmsg | Per-packet memcpy | `_mm_stream_si128` gather | `_mm256_stream_si256` gather | NEON gather |
+| **Stats accumulation** | Sum bytes, packets, rates | Scalar add | `_mm_add_epi64` | `_mm256_add_epi64` | `vaddq_u64` |
+| **Token bucket refill** | Batch-check N connections | Scalar loop | `_mm_cmpgt_epi32` (4x parallel) | `_mm256_cmpgt_epi32` (8x) | `vcgtq_f32` |
+| **Address comparison** | Match incoming packet to connection | `memcmp` | `_mm_cmpeq_epi8` + `_mm_movemask` | `_mm256_cmpeq_epi8` | `vceqq_u8` |
+| **XOR key derivation** | HKDF intermediate steps | Scalar XOR | `_mm_xor_si128` | `_mm256_xor_si256` | `veorq_u8` |
+
+### 2.3 Source Organization
+
+```
+src/simd/
+├── netudp_simd.h              // Dispatch table + detection
+├── netudp_simd_detect.c       // CPUID / compile-time detection
+├── netudp_simd_generic.c      // Scalar fallback (always compiled)
+├── netudp_simd_sse42.c        // SSE4.2 implementations (-msse4.2)
+├── netudp_simd_avx2.c         // AVX2 implementations (-mavx2 -mbmi2)
+├── netudp_simd_neon.c         // NEON implementations (-mfpu=neon)
+└── netudp_simd_avx512.c       // AVX-512 (future, -mavx512f)
+```
+
+Each file compiles with its own ISA flags. Function pointers resolved at init:
+
+```c
+// netudp_simd.h
+typedef struct {
+    uint32_t (*crc32c)(const uint8_t * data, int len);
+    void     (*memcpy_nt)(void * dst, const void * src, size_t len);  // Non-temporal
+    void     (*memset_zero)(void * dst, size_t len);
+    int      (*ack_bits_scan)(uint32_t ack_bits, int * indices);      // Returns unacked indices
+    int      (*replay_check)(const uint64_t * window, uint64_t seq);
+    void     (*stats_accumulate)(uint64_t * accum, const uint64_t * delta, int count);
+    int      (*addr_compare)(const void * a, const void * b, int len);
+    // ... crypto functions via same dispatch
+} netudp_simd_ops_t;
+
+extern const netudp_simd_ops_t * netudp_simd;  // Set once at netudp_init()
+```
+
+### 2.4 Non-Temporal Stores for Buffer Pool
+
+When filling/copying packet buffers, use non-temporal (streaming) stores to avoid polluting L1/L2 cache:
+
+```c
+// AVX2: 32-byte aligned, non-temporal store
+void netudp_memcpy_nt_avx2(void * dst, const void * src, size_t len) {
+    const __m256i * s = (const __m256i *)src;
+    __m256i * d = (__m256i *)dst;
+    size_t blocks = len / 32;
+    for (size_t i = 0; i < blocks; i++)
+        _mm256_stream_si256(d + i, _mm256_load_si256(s + i));
+    _mm_sfence();
+    // Handle remainder with scalar
+}
+```
+
+This is critical for servers with 1000+ connections — regular `memcpy` thrashes the cache when moving gigabytes of packet data per second.
+
+---
+
+## 3. Benchmark Framework
+
+### 3.1 Design: Every Optimization Must Be Proven
+
+```
+Rule: No SIMD path is merged without a benchmark showing ≥ 20% improvement
+      over the scalar fallback, measured on the target hardware class.
+```
+
+### 3.2 Benchmark Categories
+
+| Category | What it measures | Target metric |
+|---|---|---|
+| **Packets Per Second (PPS)** | Raw throughput: create → serialize → encrypt → send | ≥ 2M PPS (single core, 64B packets) |
+| **Latency (p50/p99/p999)** | End-to-end: send → recv → decrypt → deliver | p99 ≤ 5 µs per packet (loopback) |
+| **CRC32C throughput** | Checksum speed | ≥ 20 GB/s (AVX2), ≥ 8 GB/s (SSE4.2) |
+| **AEAD throughput** | Encrypt + decrypt | ≥ 2 GB/s (ChaCha20, AVX2) |
+| **Buffer pool** | Acquire + release cycle | ≤ 10 ns per operation |
+| **Ack processing** | Parse ack_bits + update reliability state | ≤ 50 ns per packet |
+| **Fragment reassembly** | Receive N fragments → deliver message | ≤ 1 µs for 10-fragment message |
+| **Connection lookup** | Address → connection slot | ≤ 30 ns (hash map) |
+| **Nagle batching** | Pack N messages into 1 UDP packet | ≤ 100 ns per message |
+| **Full pipeline** | Application send → wire → recv → application deliver | ≤ 15 µs (loopback, reliable, encrypted) |
+| **Memory bandwidth** | Sustained packet throughput vs memory bottleneck | Identify ceiling |
+| **Scalability** | PPS as function of connection count (1, 10, 100, 1000) | Linear degradation |
+
+### 3.3 Benchmark Infrastructure
+
+```
+bench/
+├── bench_main.c               // Benchmark runner + reporter
+├── bench_pps.c                // Packets per second (send/recv loop)
+├── bench_latency.c            // End-to-end latency histogram
+├── bench_crc32c.c             // CRC32C throughput (generic vs SSE vs AVX)
+├── bench_aead.c               // AEAD encrypt/decrypt throughput
+├── bench_buffer_pool.c        // Pool acquire/release throughput
+├── bench_ack_processing.c     // Ack bitmask scan + reliability update
+├── bench_fragment.c           // Fragment reassembly
+├── bench_connection_lookup.c  // Address hash map lookup
+├── bench_nagle.c              // Batching throughput
+├── bench_full_pipeline.c      // End-to-end with all layers
+├── bench_scalability.c        // PPS vs connection count
+└── bench_simd_compare.c       // Side-by-side: generic vs SSE vs AVX vs NEON
+```
+
+### 3.4 CI Benchmark Regression
+
+```yaml
+# .github/workflows/benchmark.yml
+# Runs on every PR, compares against main branch baseline
+# Fails if any metric regresses > 5%
+# Reports results as PR comment with tables
+```
+
+### 3.5 Hardware Targets
+
+| Platform | CPU | Expected PPS (64B, encrypted) |
+|---|---|---|
+| Cloud (AWS c6i.xlarge) | Intel Ice Lake 4 vCPU | ≥ 1.5M PPS |
+| Desktop (dev) | AMD Ryzen 7 / Intel i7 | ≥ 2M PPS |
+| ARM server (AWS c7g) | Graviton3 | ≥ 1M PPS |
+| Raspberry Pi 4 | Cortex-A72 | ≥ 200K PPS |
+| Steam Deck | AMD Zen 2 APU | ≥ 500K PPS |
+
+### 3.6 Reporting Format
+
+```
+=== netudp benchmark v0.1.0 ===
+Platform: linux-x64, SIMD: AVX2
+CPU: AMD Ryzen 7 7800X3D, 8 cores
+
+Packets Per Second (64B payload, encrypted, reliable):
+  send:    2,341,892 PPS  (149.9 MB/s)
+  recv:    2,518,403 PPS  (161.2 MB/s)
+  roundtrip: 1,847,221 PPS
+
+Latency (loopback, 64B, encrypted, reliable):
+  p50:   2.3 µs
+  p99:   4.1 µs
+  p999:  8.7 µs
+
+CRC32C (1400B packets):
+  generic:   1.2 GB/s
+  sse42:     8.4 GB/s  (7.0× speedup)
+  avx2:      8.4 GB/s  (same, CRC32C is SSE4.2 instruction)
+
+ChaCha20-Poly1305 (1200B payload):
+  generic:   0.4 GB/s
+  sse42:     1.1 GB/s  (2.8× speedup)
+  avx2:      2.3 GB/s  (5.8× speedup)
+
+Buffer Pool:
+  acquire:   4.2 ns
+  release:   3.8 ns
+
+SIMD comparison (ack_bits_scan, 32 bits):
+  generic:   18.4 ns
+  sse42:      5.2 ns  (3.5× speedup)
+  avx2:       4.8 ns  (3.8× speedup)
+```
+
+---
+
+## 4. Layer Architecture
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -90,7 +290,7 @@ This architecture synthesizes the best patterns from six analyzed implementation
 
 ---
 
-## 3. Connect Token System (from netcode.io)
+## 5. Connect Token System (from netcode.io)
 
 The authentication model follows netcode.io's proven connect token pattern exactly.
 
@@ -202,7 +402,7 @@ Multi-server fallback: if server N fails, client tries server N+1 from token.
 
 ---
 
-## 4. Channel System
+## 6. Channel System
 
 ### 4.1 Channel Types
 
@@ -251,7 +451,7 @@ UNRELIABLE_SEQUENCED → netc stateless (packets may be dropped)
 
 ---
 
-## 5. Reliability Engine
+## 7. Reliability Engine
 
 ### 5.1 Packet-Level Acknowledgment
 
@@ -303,7 +503,7 @@ struct netudp_replay_protection {
 
 ---
 
-## 6. Wire Format
+## 8. Wire Format
 
 ### 6.1 Multi-Frame Packet (from GNS)
 
@@ -378,7 +578,7 @@ Matches netcode.io's AAD scheme. The header is authenticated but not encrypted �
 
 ---
 
-## 7. Encryption
+## 9. Encryption
 
 ### 7.1 Algorithms
 
@@ -432,7 +632,7 @@ For LAN/development scenarios where encryption overhead is unwanted:
 
 ---
 
-## 8. Compression (via netc)
+## 10. Compression (via netc)
 
 ### 8.1 Integration
 
@@ -468,7 +668,7 @@ config.compression_level = 5;         // 0=fastest, 9=best ratio
 
 ---
 
-## 9. Bandwidth Control
+## 11. Bandwidth Control
 
 ### 9.1 Token Bucket (from Server5 WAF + GNS)
 
@@ -500,7 +700,7 @@ stats.queue_time_us            // How long data waits before being sent
 
 ---
 
-## 10. Connection Statistics (from GNS)
+## 12. Connection Statistics (from GNS)
 
 ```c
 typedef struct {
@@ -533,7 +733,7 @@ typedef struct {
 
 ---
 
-## 11. Public API
+## 13. Public API
 
 ### 11.1 Lifecycle
 
@@ -664,7 +864,7 @@ int netudp_server_stats(netudp_server_t * server, netudp_server_stats_t * stats)
 
 ---
 
-## 12. Zero-GC Memory Model
+## 14. Zero-GC Memory Model
 
 ### 12.1 Zero-GC Guarantee
 
@@ -753,7 +953,7 @@ All allocated once at start. Zero-alloc during runtime. Configurable per use cas
 
 ---
 
-## 13. Threading Model
+## 15. Threading Model
 
 **Single-threaded per instance. No internal locks.**
 
@@ -787,7 +987,7 @@ while (running) {
 
 ---
 
-## 14. Network Simulator (from netcode.io)
+## 16. Network Simulator (from netcode.io)
 
 Built-in for testing. Configurable per-instance:
 
@@ -802,7 +1002,7 @@ typedef struct {
 
 ---
 
-## 15. Packet Interfaces (for Game Server Implementation)
+## 17. Packet Interfaces (for Game Server Implementation)
 
 netudp is transport-only, but it provides clean interfaces so game servers can plug in packet handling, serialization, and dispatch without modifying the library.
 
@@ -937,7 +1137,7 @@ void netudp_server_send_to_list(netudp_server_t * server, const int * client_ind
 
 ---
 
-## 16. SDK & Engine Integration
+## 18. SDK & Engine Integration
 
 ### 16.1 Target Engines
 
@@ -1101,7 +1301,7 @@ func _on_packet_received(client_index: int, channel: int, data: PackedByteArray)
 
 ---
 
-## 17. Implementation Phases
+## 19. Implementation Phases
 
 ### Phase 0: Project Setup
 - CMake + Zig CC build system
