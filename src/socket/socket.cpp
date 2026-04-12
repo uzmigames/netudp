@@ -2,7 +2,7 @@
 #include "../profiling/profiler.h"
 #include <cstring>
 
-#if defined(__linux__)
+#ifdef __linux__
 #include <sys/socket.h>
 #endif
 
@@ -10,7 +10,7 @@ namespace netudp {
 
 /* ===== Platform init/term ===== */
 
-#if defined(NETUDP_PLATFORM_WINDOWS)
+#ifdef NETUDP_PLATFORM_WINDOWS
 
 int socket_platform_init() {
     WSADATA wsa;
@@ -45,8 +45,9 @@ static void address_to_sockaddr(const netudp_address_t* addr,
         sin6->sin6_family = AF_INET6;
         sin6->sin6_port = htons(addr->port);
         for (int i = 0; i < 8; ++i) {
-            sin6->sin6_addr.s6_addr[i * 2]     = static_cast<uint8_t>(addr->data.ipv6[i] >> 8);
-            sin6->sin6_addr.s6_addr[i * 2 + 1] = static_cast<uint8_t>(addr->data.ipv6[i] & 0xFF);
+            const auto idx = static_cast<size_t>(i);
+            sin6->sin6_addr.s6_addr[(idx * 2U)]      = static_cast<uint8_t>(addr->data.ipv6[i] >> 8);
+            sin6->sin6_addr.s6_addr[(idx * 2U) + 1U] = static_cast<uint8_t>(addr->data.ipv6[i] & 0xFF);
         }
         *ss_len = sizeof(struct sockaddr_in6);
     } else {
@@ -67,9 +68,10 @@ static void sockaddr_to_address(const struct sockaddr_storage* ss,
         addr->type = NETUDP_ADDRESS_IPV6;
         addr->port = ntohs(sin6->sin6_port);
         for (int i = 0; i < 8; ++i) {
+            const auto idx = static_cast<size_t>(i);
             addr->data.ipv6[i] = static_cast<uint16_t>(
-                (sin6->sin6_addr.s6_addr[i * 2] << 8) |
-                 sin6->sin6_addr.s6_addr[i * 2 + 1]);
+                (static_cast<uint16_t>(sin6->sin6_addr.s6_addr[(idx * 2U)])      << 8) |
+                 static_cast<uint16_t>(sin6->sin6_addr.s6_addr[(idx * 2U) + 1U]));
         }
     } else {
         const auto* sin4 = reinterpret_cast<const struct sockaddr_in*>(ss);
@@ -113,7 +115,7 @@ int socket_create(Socket* out, const netudp_address_t* bind_addr,
     }
 
     /* Non-blocking */
-#if defined(NETUDP_PLATFORM_WINDOWS)
+#ifdef NETUDP_PLATFORM_WINDOWS
     unsigned long nonblock = 1;
     if (ioctlsocket(sock, FIONBIO, &nonblock) != 0) {
         closesocket(sock);
@@ -133,7 +135,7 @@ int socket_create(Socket* out, const netudp_address_t* bind_addr,
     address_to_sockaddr(bind_addr, &ss, &ss_len);
 
     if (bind(sock, reinterpret_cast<const struct sockaddr*>(&ss), ss_len) != 0) {
-#if defined(NETUDP_PLATFORM_WINDOWS)
+#ifdef NETUDP_PLATFORM_WINDOWS
         closesocket(sock);
 #else
         close(sock);
@@ -160,7 +162,7 @@ int socket_send(Socket* sock, const netudp_address_t* dest,
                         static_cast<const char*>(data), len, 0,
                         reinterpret_cast<const struct sockaddr*>(&ss), ss_len);
 
-#if defined(NETUDP_PLATFORM_WINDOWS)
+#ifdef NETUDP_PLATFORM_WINDOWS
     if (result == SOCKET_ERROR) {
         return -1;
     }
@@ -183,7 +185,7 @@ int socket_recv(Socket* sock, netudp_address_t* from,
     struct sockaddr_storage ss;
     std::memset(&ss, 0, sizeof(ss));
 
-#if defined(NETUDP_PLATFORM_WINDOWS)
+#ifdef NETUDP_PLATFORM_WINDOWS
     int ss_len = sizeof(ss);
 #else
     socklen_t ss_len = sizeof(ss);
@@ -193,7 +195,7 @@ int socket_recv(Socket* sock, netudp_address_t* from,
                           static_cast<char*>(buf), buf_len, 0,
                           reinterpret_cast<struct sockaddr*>(&ss), &ss_len);
 
-#if defined(NETUDP_PLATFORM_WINDOWS)
+#ifdef NETUDP_PLATFORM_WINDOWS
     if (result == SOCKET_ERROR) {
         int err = WSAGetLastError();
         if (err == WSAEWOULDBLOCK) {
@@ -222,7 +224,7 @@ void socket_destroy(Socket* sock) {
         return;
     }
 
-#if defined(NETUDP_PLATFORM_WINDOWS)
+#ifdef NETUDP_PLATFORM_WINDOWS
     closesocket(sock->handle);
 #else
     close(sock->handle);
@@ -233,7 +235,7 @@ void socket_destroy(Socket* sock) {
 
 /* ===== Batch recv/send ===== */
 
-#if defined(__linux__)
+#ifdef __linux__
 
 int socket_recv_batch(Socket* sock, SocketPacket* pkts, int max_pkts, int buf_len) {
     NETUDP_ZONE("sock::recv_batch");

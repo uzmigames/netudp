@@ -3,8 +3,7 @@
 #include "../profiling/profiler.h"
 #include <cstring>
 
-namespace netudp {
-namespace crypto {
+namespace netudp::crypto {
 
 int aead_encrypt(const uint8_t key[32], const uint8_t nonce[24],
                  const uint8_t* aad, int aad_len,
@@ -48,5 +47,4 @@ int aead_decrypt(const uint8_t key[32], const uint8_t nonce[24],
     return pt_len;
 }
 
-} // namespace crypto
-} // namespace netudp
+} // namespace netudp::crypto

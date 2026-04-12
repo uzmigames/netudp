@@ -2,8 +2,7 @@
 #include "vendor/monocypher.h"
 #include "../profiling/profiler.h"
 
-namespace netudp {
-namespace crypto {
+namespace netudp::crypto {
 
 /*
  * Monocypher provides crypto_aead_lock/unlock for ChaCha20-Poly1305 (12-byte nonce).
@@ -65,5 +64,4 @@ int xchacha_decrypt(const uint8_t key[32], const uint8_t nonce[24],
     return pt_len;
 }
 
-} // namespace crypto
-} // namespace netudp
+} // namespace netudp::crypto

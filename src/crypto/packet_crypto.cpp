@@ -7,8 +7,7 @@
 #include <cinttypes>
 #include <cstring>
 
-namespace netudp {
-namespace crypto {
+namespace netudp::crypto {
 
 /* ======================================================================
  * Key derivation helper — Blake2b-keyed PRF (replaces HKDF-SHA256)
@@ -119,6 +118,7 @@ void on_receive_rekey(KeyEpoch& epoch, double current_time) {
     activate_rekey(epoch, current_time);
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) — inflated by NLOG macro expansions
 int packet_decrypt_grace(KeyEpoch* epoch, uint64_t protocol_id, uint8_t prefix_byte,
                          uint64_t nonce_counter, const uint8_t* ct, int ct_len,
                          uint8_t* pt) {
@@ -206,5 +206,4 @@ int packet_decrypt(KeyEpoch* epoch, uint64_t protocol_id, uint8_t prefix_byte,
     return pt_len;
 }
 
-} // namespace crypto
-} // namespace netudp
+} // namespace netudp::crypto
