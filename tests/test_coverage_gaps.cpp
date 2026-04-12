@@ -66,14 +66,14 @@ TEST(ApiStubs, ClientStateReturnsDisconnected) {
     netudp_term();
 }
 
-TEST(ApiStubs, GenerateTokenReturnsNotInitialized) {
+TEST(ApiStubs, GenerateTokenSucceeds) {
     netudp_init();
-    uint8_t key[32] = {};
+    uint8_t key[32] = {1};
     uint8_t ud[256] = {};
     uint8_t token[2048] = {};
     const char* servers[] = {"127.0.0.1:7777"};
     EXPECT_EQ(netudp_generate_connect_token(1, servers, 300, 10, 1, 1, key, ud, token),
-              NETUDP_ERROR_NOT_INITIALIZED);
+              NETUDP_OK);
     netudp_term();
 }
 

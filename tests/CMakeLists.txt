@@ -24,6 +24,7 @@ add_executable(netudp_tests
     test_replay.cpp
     test_packet_crypto.cpp
     test_coverage_gaps.cpp
+    test_connect_token.cpp
 )
 
 # Tests need access to internal src/ headers for SIMD dispatch testing

@@ -26,6 +26,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 add_library(netudp STATIC
     src/api.cpp
     src/core/address.cpp
+    src/connection/connect_token.cpp
     src/socket/socket.cpp
     src/crypto/vendor/monocypher.c
     src/crypto/aead.cpp
