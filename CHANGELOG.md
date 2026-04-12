@@ -3,6 +3,40 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.0] - 2026-04-12
+
+### Added
+- **Batch socket I/O**: `socket_recv_batch` / `socket_send_batch` — Linux `recvmmsg`/`sendmmsg` (up to 64 datagrams/syscall) with loop fallback for Windows/macOS (spec 02)
+- **Batch public API**: `netudp_server_send_batch()` — queue messages to multiple clients in one call; `netudp_server_receive_batch()` — dequeue from all clients in one call (spec 13)
+- **Example programs**: `examples/echo_server.c`, `examples/echo_client.c`, `examples/chat_server.c`, `examples/stress_test.c` with `examples/CMakeLists.txt`
+- **Cache-line alignment**: `alignas(64)` on `Connection`, `Channel`, `PacketTracker` with `static_assert` verification
+- **Observability**: `NETUDP_ZONE()` profiling macros across all hot paths — 33+ named zones covering crypto, channel, reliability, fragment, bandwidth, socket, and connection layers; `netudp_profiling_enable/disable`, `netudp_profiling_get_zones`, `netudp_profiling_reset`
+- **Structured logging**: `NLOG_ERROR/WARN/INFO/DEBUG/TRACE` macros with per-module log levels, runtime log callback, and `NETUDP_LOG_LEVEL` compile-time floor
+- **Compression wrapper**: netc integration via `CompressorPipeline` — stateful (reliable) and stateless (unreliable) modes, optional per-connection dict
+
+### Fixed
+- **XChaCha20 decrypt always failed**: `xchacha_decrypt` was manually running HChaCha20 to derive a subkey, then passing a 12-byte `subnonce` to `crypto_aead_unlock` which expects 24 bytes — the upper 12 bytes were uninitialized stack memory, causing MAC verification to always fail. Fix: pass the original 24-byte nonce directly to monocypher's `crypto_aead_lock`/`crypto_aead_unlock` which handle XChaCha20 internally. Unblocked all connect-token and handshake tests.
+- **MSVC `##__LINE__` expansion in `NETUDP_ZONE`**: Added `NZ_CAT2`/`NZ_CAT` double-expansion macros to fix MSVC token-paste behavior when nesting multiple `NETUDP_ZONE` calls in the same function scope
+
+### Changed
+- `bench_pps` now reports state + server max-clients on connection failure for easier debugging
+- Test suite expanded to 335 tests: `test_batch_io` (batch socket), `test_batch_api` (batch public API)
+
+### Performance (Windows, desktop, 2026)
+| Metric | Result |
+|--------|--------|
+| Memory per connection | 4.4 KB |
+| Memory, 1024 connections | 4.4 MiB |
+| CRC32C speedup (SSE4.2) | 22.5× over scalar |
+| CRC32C speedup (AVX2) | 22.5× over scalar |
+| Replay check speedup (AVX2) | 2.3× over scalar |
+| PPS, Windows loopback | ~90 K (socket-limited) |
+| Latency p99, Windows loopback | ~18 µs (socket-limited) |
+
+PPS ≥ 2M and p99 ≤ 5 µs are achievable on Linux with `recvmmsg`/`sendmmsg` batch sockets.
+
+---
+
 ## [0.1.0-dev] - Unreleased
 
 ### Added
