@@ -60,3 +60,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Reliable retransmission: RTT-adaptive backoff (RTO x 2^min(retry,5)), max 10 retries
 - Reliable ordered delivery: buffer out-of-order, deliver contiguous from recv_seq
 - Reliable unordered delivery: immediate delivery with duplicate detection
+- Fragmentation: split messages > MTU into up to 255 fragments (4-byte header)
+- Fragment reassembly: 16 concurrent slots, bitmask tracking, timeout cleanup (5s)
+- calc_fragment_count: validate message fits within MAX_FRAGMENT_COUNT × payload
+- Wire format frames: UNRELIABLE_DATA, RELIABLE_DATA, FRAGMENT_DATA, DISCONNECT
+- Frame serialization with buffer overflow protection
