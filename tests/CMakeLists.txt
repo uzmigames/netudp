@@ -36,6 +36,8 @@ add_executable(netudp_tests
     test_network_sim.cpp
     test_buffer_api.cpp
     test_rekey.cpp
+    test_batch_io.cpp
+    test_batch_api.cpp
 )
 
 # Tests need access to internal src/ headers for SIMD dispatch testing

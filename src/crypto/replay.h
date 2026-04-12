@@ -9,6 +9,7 @@
  * wire sequence. This avoids wraparound issues. See spec 04 REQ-04.9.
  */
 
+#include "../profiling/profiler.h"
 #include <cstdint>
 #include <cstring>
 
@@ -30,6 +31,7 @@ struct ReplayProtection {
      * @return true if packet should be REJECTED (duplicate or too old)
      */
     bool is_duplicate(uint64_t nonce) const {
+        NETUDP_ZONE("replay::check");
         /* Too old: more than WINDOW_SIZE behind most_recent */
         if (most_recent >= WINDOW_SIZE && nonce + WINDOW_SIZE <= most_recent) {
             return true;
@@ -45,6 +47,7 @@ struct ReplayProtection {
      * Call AFTER successful decryption (not before).
      */
     void advance(uint64_t nonce) {
+        NETUDP_ZONE("replay::advance");
         received[nonce % WINDOW_SIZE] = nonce;
         if (nonce > most_recent) {
             most_recent = nonce;

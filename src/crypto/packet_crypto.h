@@ -12,6 +12,7 @@
 
 #include <netudp/netudp_config.h>
 #include "replay.h"
+#include "../profiling/profiler.h"
 #include <cstdint>
 #include <cstring>
 
@@ -44,12 +45,14 @@ struct KeyEpoch {
 /** Build a 24-byte nonce from a 64-bit counter (little-endian, zero-padded).
  *  Monocypher uses XChaCha20-Poly1305 with 24-byte nonces. */
 inline void build_nonce(uint64_t counter, uint8_t nonce[24]) {
+    NETUDP_ZONE("crypto::build_nonce");
     std::memset(nonce, 0, 24);
     std::memcpy(nonce, &counter, 8);
 }
 
 /** Build the 22-byte AAD: version_info(13) + protocol_id(8) + prefix_byte(1). */
 inline int build_aad(uint64_t protocol_id, uint8_t prefix_byte, uint8_t aad[22]) {
+    NETUDP_ZONE("crypto::build_aad");
     std::memcpy(aad, NETUDP_VERSION_INFO, NETUDP_VERSION_INFO_BYTES);
     std::memcpy(aad + NETUDP_VERSION_INFO_BYTES, &protocol_id, 8);
     aad[NETUDP_VERSION_INFO_BYTES + 8] = prefix_byte;

@@ -32,6 +32,20 @@ struct Socket {
     netudp_socket_handle_t handle = NETUDP_INVALID_SOCKET;
 };
 
+/** Maximum datagrams per batch recv/send call. */
+static constexpr int kSocketBatchMax = 64;
+
+/**
+ * Single packet entry for batch operations.
+ *  recv: addr=source (out), data=pre-allocated buf (in), len=bytes received (out)
+ *  send: addr=dest   (in),  data=payload      (in), len=bytes to send   (in)
+ */
+struct SocketPacket {
+    netudp_address_t addr;
+    void*            data;
+    int              len;
+};
+
 /**
  * Initialize platform socket subsystem (WSAStartup on Windows, no-op on Unix).
  * Called once from netudp_init().
@@ -68,6 +82,23 @@ int socket_recv(Socket* sock, netudp_address_t* from,
  * Close socket.
  */
 void socket_destroy(Socket* sock);
+
+/**
+ * Receive up to max_pkts datagrams in a single call.
+ *  pkts[i].data must point to a pre-allocated buffer of at least buf_len bytes.
+ *  On return, pkts[i].addr = source address, pkts[i].len = bytes received.
+ *  Linux: uses recvmmsg(). Windows/macOS: loops recvfrom().
+ *  Returns count of packets received (0 = no data), -1 on error.
+ */
+int socket_recv_batch(Socket* sock, SocketPacket* pkts, int max_pkts, int buf_len);
+
+/**
+ * Send count datagrams in a single call.
+ *  pkts[i].addr = destination, pkts[i].data = payload, pkts[i].len = bytes.
+ *  Linux: uses sendmmsg(). Windows/macOS: loops sendto().
+ *  Returns count of packets sent, -1 on error.
+ */
+int socket_send_batch(Socket* sock, const SocketPacket* pkts, int count);
 
 } // namespace netudp
 

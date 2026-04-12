@@ -80,6 +80,7 @@ public:
 
     /** Check if there are messages ready to send (Nagle timer expired or bypassed). */
     bool has_pending(double now) const {
+        NETUDP_ZONE("chan::has_pending");
         if (send_queue_.is_empty()) {
             return false;
         }
@@ -95,6 +96,7 @@ public:
 
     /** Dequeue the next message to send. Returns false if no messages ready. */
     bool dequeue_send(QueuedMessage* out) {
+        NETUDP_ZONE("chan::dequeue_send");
         if (send_queue_.is_empty()) {
             return false;
         }
@@ -120,12 +122,14 @@ public:
 
     /** Process a received unreliable message. Returns true if should deliver. */
     bool on_recv_unreliable(uint16_t /*sequence*/) {
+        NETUDP_ZONE("chan::on_recv_unreliable");
         stats_.messages_received++;
         return true; /* Always deliver unreliable */
     }
 
     /** Process a received unreliable_sequenced message. Returns true if should deliver. */
     bool on_recv_unreliable_sequenced(uint16_t sequence) {
+        NETUDP_ZONE("chan::on_recv_seq");
         stats_.messages_received++;
         int16_t diff = static_cast<int16_t>(sequence - last_delivered_seq_);
         if (diff <= 0 && last_delivered_seq_ != 0) {

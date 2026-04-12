@@ -98,7 +98,10 @@ static BenchResult run_pps_bench(const BenchConfig& cfg, int port_offset) {
     }
 
     if (netudp_client_state(client) != 3) {
-        std::fprintf(stderr, "[pps] client failed to connect\n");
+        int final_state = netudp_client_state(client);
+        int srv_clients = netudp_server_max_clients(server);
+        std::fprintf(stderr, "[pps] client failed to connect (state=%d, srv_max=%d)\n",
+                     final_state, srv_clients);
         netudp_client_disconnect(client);
         netudp_client_destroy(client);
         netudp_server_stop(server);

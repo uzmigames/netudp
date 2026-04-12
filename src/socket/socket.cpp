@@ -1,5 +1,10 @@
 #include "socket.h"
+#include "../profiling/profiler.h"
 #include <cstring>
+
+#if defined(__linux__)
+#include <sys/socket.h>
+#endif
 
 namespace netudp {
 
@@ -142,6 +147,7 @@ int socket_create(Socket* out, const netudp_address_t* bind_addr,
 
 int socket_send(Socket* sock, const netudp_address_t* dest,
                 const void* data, int len) {
+    NETUDP_ZONE("sock::send");
     if (sock == nullptr || sock->handle == NETUDP_INVALID_SOCKET) {
         return -1;
     }
@@ -169,6 +175,7 @@ int socket_send(Socket* sock, const netudp_address_t* dest,
 
 int socket_recv(Socket* sock, netudp_address_t* from,
                 void* buf, int buf_len) {
+    NETUDP_ZONE("sock::recv");
     if (sock == nullptr || sock->handle == NETUDP_INVALID_SOCKET) {
         return -1;
     }
@@ -223,5 +230,132 @@ void socket_destroy(Socket* sock) {
 
     sock->handle = NETUDP_INVALID_SOCKET;
 }
+
+/* ===== Batch recv/send ===== */
+
+#if defined(__linux__)
+
+int socket_recv_batch(Socket* sock, SocketPacket* pkts, int max_pkts, int buf_len) {
+    NETUDP_ZONE("sock::recv_batch");
+    if (sock == nullptr || sock->handle == NETUDP_INVALID_SOCKET ||
+        pkts == nullptr || max_pkts <= 0) {
+        return -1;
+    }
+
+    /* Stack-allocate control structures (max kSocketBatchMax entries). */
+    const int count = (max_pkts > kSocketBatchMax) ? kSocketBatchMax : max_pkts;
+
+    struct mmsghdr   mmsg[kSocketBatchMax];
+    struct iovec     iov[kSocketBatchMax];
+    struct sockaddr_storage addrs[kSocketBatchMax];
+
+    std::memset(mmsg,  0, sizeof(struct mmsghdr)          * static_cast<size_t>(count));
+    std::memset(addrs, 0, sizeof(struct sockaddr_storage) * static_cast<size_t>(count));
+
+    for (int i = 0; i < count; ++i) {
+        iov[i].iov_base              = pkts[i].data;
+        iov[i].iov_len               = static_cast<size_t>(buf_len);
+        mmsg[i].msg_hdr.msg_iov      = &iov[i];
+        mmsg[i].msg_hdr.msg_iovlen   = 1;
+        mmsg[i].msg_hdr.msg_name     = &addrs[i];
+        mmsg[i].msg_hdr.msg_namelen  = sizeof(struct sockaddr_storage);
+    }
+
+    int received = static_cast<int>(recvmmsg(sock->handle, mmsg,
+                                             static_cast<unsigned int>(count),
+                                             MSG_DONTWAIT, nullptr));
+    if (received <= 0) {
+        if (received == 0 || errno == EAGAIN || errno == EWOULDBLOCK) {
+            return 0;
+        }
+        return -1;
+    }
+
+    for (int i = 0; i < received; ++i) {
+        pkts[i].len = static_cast<int>(mmsg[i].msg_len);
+        sockaddr_to_address(&addrs[i], &pkts[i].addr);
+    }
+
+    return received;
+}
+
+int socket_send_batch(Socket* sock, const SocketPacket* pkts, int count) {
+    NETUDP_ZONE("sock::send_batch");
+    if (sock == nullptr || sock->handle == NETUDP_INVALID_SOCKET ||
+        pkts == nullptr || count <= 0) {
+        return -1;
+    }
+
+    const int batch = (count > kSocketBatchMax) ? kSocketBatchMax : count;
+
+    struct mmsghdr  mmsg[kSocketBatchMax];
+    struct iovec    iov[kSocketBatchMax];
+    struct sockaddr_storage addrs[kSocketBatchMax];
+
+    std::memset(mmsg,  0, sizeof(struct mmsghdr)          * static_cast<size_t>(batch));
+    std::memset(addrs, 0, sizeof(struct sockaddr_storage) * static_cast<size_t>(batch));
+
+    for (int i = 0; i < batch; ++i) {
+        int ss_len = 0;
+        address_to_sockaddr(&pkts[i].addr, &addrs[i], &ss_len);
+
+        iov[i].iov_base              = pkts[i].data;
+        iov[i].iov_len               = static_cast<size_t>(pkts[i].len);
+        mmsg[i].msg_hdr.msg_iov      = &iov[i];
+        mmsg[i].msg_hdr.msg_iovlen   = 1;
+        mmsg[i].msg_hdr.msg_name     = &addrs[i];
+        mmsg[i].msg_hdr.msg_namelen  = static_cast<socklen_t>(ss_len);
+    }
+
+    int sent = static_cast<int>(sendmmsg(sock->handle, mmsg,
+                                         static_cast<unsigned int>(batch), 0));
+    return (sent < 0) ? -1 : sent;
+}
+
+#else /* Windows / macOS — loop fallback */
+
+int socket_recv_batch(Socket* sock, SocketPacket* pkts, int max_pkts, int buf_len) {
+    NETUDP_ZONE("sock::recv_batch");
+    if (sock == nullptr || sock->handle == NETUDP_INVALID_SOCKET ||
+        pkts == nullptr || max_pkts <= 0) {
+        return -1;
+    }
+
+    int received = 0;
+    const int limit = (max_pkts > kSocketBatchMax) ? kSocketBatchMax : max_pkts;
+
+    for (int i = 0; i < limit; ++i) {
+        int n = socket_recv(sock, &pkts[i].addr, pkts[i].data, buf_len);
+        if (n <= 0) {
+            break;
+        }
+        pkts[i].len = n;
+        ++received;
+    }
+
+    return received;
+}
+
+int socket_send_batch(Socket* sock, const SocketPacket* pkts, int count) {
+    NETUDP_ZONE("sock::send_batch");
+    if (sock == nullptr || sock->handle == NETUDP_INVALID_SOCKET ||
+        pkts == nullptr || count <= 0) {
+        return -1;
+    }
+
+    int sent = 0;
+    for (int i = 0; i < count; ++i) {
+        int n = socket_send(sock, &pkts[i].addr,
+                            pkts[i].data, pkts[i].len);
+        if (n < 0) {
+            break;
+        }
+        ++sent;
+    }
+
+    return sent;
+}
+
+#endif /* __linux__ */
 
 } // namespace netudp

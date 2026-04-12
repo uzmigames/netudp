@@ -52,6 +52,7 @@ struct QueuedBitsBudget {
     int32_t burst_bits = 32 * 1024 * 8; /* burst_bytes × 8 */
 
     void refill(double delta_time, uint32_t send_rate_bps) {
+        NETUDP_ZONE("qbits::refill");
         queued_bits -= static_cast<int32_t>(static_cast<double>(send_rate_bps) * 8.0 * delta_time);
         if (queued_bits < -burst_bits) {
             queued_bits = -burst_bits;
@@ -59,10 +60,12 @@ struct QueuedBitsBudget {
     }
 
     void consume(int packet_bytes) {
+        NETUDP_ZONE("qbits::consume");
         queued_bits += packet_bytes * 8;
     }
 
     bool can_send() const {
+        NETUDP_ZONE("qbits::can_send");
         return queued_bits <= 0;
     }
 };

@@ -26,6 +26,7 @@ static const uint8_t kRekeyLabel[12] = {
 };
 
 static void derive_key(const uint8_t* old_key, uint32_t epoch_number, uint8_t* new_key) {
+    NETUDP_ZONE("crypto::derive_key");
     uint8_t info[16];
     std::memcpy(info, kRekeyLabel, 12);
     std::memcpy(info + 12, &epoch_number, 4);

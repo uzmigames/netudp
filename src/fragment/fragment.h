@@ -90,6 +90,7 @@ struct FragmentTracker {
     }
 
     void mark_fragment(int index) {
+        NETUDP_ZONE("frag::mark");
         if (!has_fragment(index)) {
             received_mask[index / 8] |= static_cast<uint8_t>(1U << (index % 8));
             received_count++;
