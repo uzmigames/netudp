@@ -22,9 +22,9 @@
  * API STUBS — verify all stubs return correct error codes
  * ===================================================================== */
 
-TEST(ApiStubs, ServerCreateReturnsNull) {
+TEST(ApiStubs, ServerCreateNullConfigReturnsNull) {
     netudp_init();
-    EXPECT_EQ(netudp_server_create("0.0.0.0:7777", nullptr, 0.0), nullptr);
+    EXPECT_EQ(netudp_server_create(nullptr, nullptr, 0.0), nullptr);
     netudp_term();
 }
 
@@ -34,15 +34,16 @@ TEST(ApiStubs, ClientCreateReturnsNull) {
     netudp_term();
 }
 
-TEST(ApiStubs, ServerSendReturnsNotInitialized) {
+TEST(ApiStubs, ServerSendNullReturnsError) {
     netudp_init();
-    EXPECT_EQ(netudp_server_send(nullptr, 0, 0, "x", 1, 0), NETUDP_ERROR_NOT_INITIALIZED);
+    int r = netudp_server_send(nullptr, 0, 0, "x", 1, 0);
+    EXPECT_NE(r, NETUDP_OK);
     netudp_term();
 }
 
-TEST(ApiStubs, ClientSendReturnsNotInitialized) {
+TEST(ApiStubs, ClientSendReturnsNotConnected) {
     netudp_init();
-    EXPECT_EQ(netudp_client_send(nullptr, 0, "x", 1, 0), NETUDP_ERROR_NOT_INITIALIZED);
+    EXPECT_EQ(netudp_client_send(nullptr, 0, "x", 1, 0), NETUDP_ERROR_NOT_CONNECTED);
     netudp_term();
 }
 

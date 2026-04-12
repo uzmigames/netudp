@@ -25,6 +25,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # --- netudp static library ---
 add_library(netudp STATIC
     src/api.cpp
+    src/server.cpp
+    src/client.cpp
     src/core/address.cpp
     src/connection/connect_token.cpp
     src/socket/socket.cpp

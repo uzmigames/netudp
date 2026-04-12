@@ -26,9 +26,9 @@ static constexpr int TOKEN_CREATE_TS_OFFSET    = 21;
 static constexpr int TOKEN_EXPIRE_TS_OFFSET    = 29;
 static constexpr int TOKEN_NONCE_OFFSET        = 37;
 static constexpr int TOKEN_PRIVATE_OFFSET      = 61;
-static constexpr int TOKEN_PRIVATE_SIZE        = 1024;
-static constexpr int TOKEN_PRIVATE_ENCRYPTED_SIZE = TOKEN_PRIVATE_SIZE + 16; /* + Poly1305 tag */
-static constexpr int TOKEN_AFTER_PRIVATE       = TOKEN_PRIVATE_OFFSET + TOKEN_PRIVATE_ENCRYPTED_SIZE; /* 1101 */
+static constexpr int TOKEN_PRIVATE_SIZE        = 1008; /* Plaintext (padded to fit MAC in 1024) */
+static constexpr int TOKEN_PRIVATE_ENCRYPTED_SIZE = 1024; /* = 1008 plaintext + 16 Poly1305 tag */
+static constexpr int TOKEN_AFTER_PRIVATE       = TOKEN_PRIVATE_OFFSET + TOKEN_PRIVATE_ENCRYPTED_SIZE; /* 61 + 1024 = 1085 */
 /* After private: timeout(4) + num_addrs(4) + addrs(var) + c2s_key(32) + s2c_key(32) + pad */
 
 /* Max size of server address in token: type(1) + IPv6(16) + port(2) = 19 */
