@@ -48,3 +48,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Server: receive loop with rate limiting, connection timeout detection
 - netudp_server_send/broadcast/broadcast_except (encrypted, simplified)
 - netudp_client_send (encrypted)
+- PacketTracker: 16-bit send sequence, piggybacked ack + 32-bit ack_bits, ack_delay_us
+- AckFields serialization (8 bytes): ack(2) + ack_bits(4) + ack_delay_us(2)
+- Sequence window protection: 33-packet window matching ack_bits coverage
+- RTT estimation: RFC 6298 (SRTT, RTTVAR, RTO), ack delay subtracted, [100ms, 2000ms] clamp
+- 4 channel types: unreliable, unreliable_sequenced, reliable_ordered, reliable_unordered
+- Per-channel send queue (256 entries), Nagle timer, NO_NAGLE/NO_DELAY bypass, flush
+- Priority + weight channel scheduler (highest priority first)
+- Unreliable sequenced: drop stale packets (sequence <= last_delivered)
+- ReliableChannelState: 512-entry send/recv buffers, per-channel message sequencing
+- Reliable retransmission: RTT-adaptive backoff (RTO x 2^min(retry,5)), max 10 retries
+- Reliable ordered delivery: buffer out-of-order, deliver contiguous from recv_seq
+- Reliable unordered delivery: immediate delivery with duplicate detection
