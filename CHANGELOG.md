@@ -65,3 +65,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - calc_fragment_count: validate message fits within MAX_FRAGMENT_COUNT × payload
 - Wire format frames: UNRELIABLE_DATA, RELIABLE_DATA, FRAGMENT_DATA, DISCONNECT
 - Frame serialization with buffer overflow protection
+- Per-connection bandwidth: TokenBucket (256KB/s, 32KB burst), QueuedBits budget
+- AIMD congestion control: loss window (64 packets), decrease ×0.75 at >5%, increase ×1.10 at <1%
+- DDoS severity escalation: 5 levels (None → Critical), auto-cooloff (30s/60s)
+- DDoS processing gates: Critical blocks new connections, High drops non-established
+- Connection stats: 30+ fields (ping, quality, throughput EMA, reliability, fragments, security)
+- Channel stats: messages/bytes/pending per channel
+- Server stats: connected clients, total PPS/bandwidth, DDoS severity
