@@ -76,8 +76,8 @@ target_compile_definitions(netudp PRIVATE
     $<$<BOOL:${NETUDP_CRC32_ONLY}>:NETUDP_CRC32_ONLY=1>
     $<$<BOOL:${NETUDP_ENABLE_AVX512}>:NETUDP_ENABLE_AVX512=1>
     $<$<BOOL:${NETUDP_HAS_NETC}>:NETUDP_HAS_NETC=1>
-    $<$<CXX_COMPILER_ID:MSVC>:NOMINMAX>
-    $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>
+    $<$<BOOL:${WIN32}>:NOMINMAX>
+    $<$<BOOL:${WIN32}>:_CRT_SECURE_NO_WARNINGS>
 )
 
 # Platform-specific link libraries
@@ -97,6 +97,8 @@ if(NETUDP_HAS_NETC)
             TARGET_DIRECTORY netc
             PROPERTIES COMPILE_FLAGS "-mxsave"
         )
+        # Suppress -Werror on vendor code (unused static functions in netc)
+        target_compile_options(netc PRIVATE -Wno-error -Wno-unused-function)
     endif()
 endif()
 
