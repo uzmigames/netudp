@@ -25,7 +25,18 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # --- netudp static library ---
 add_library(netudp STATIC
     src/api.cpp
+    src/simd/netudp_simd_detect.cpp
+    src/simd/simd_generic.cpp
+    src/simd/simd_sse42.cpp
+    src/simd/simd_avx2.cpp
+    src/simd/simd_neon.cpp
 )
+
+# --- Per-file SIMD compile flags (non-MSVC only, MSVC enables intrinsics by default) ---
+if(NOT MSVC)
+    set_source_files_properties(src/simd/simd_sse42.cpp PROPERTIES COMPILE_FLAGS "-msse4.2 -mpopcnt")
+    set_source_files_properties(src/simd/simd_avx2.cpp PROPERTIES COMPILE_FLAGS "-mavx2 -mbmi2")
+endif()
 
 target_include_directories(netudp
     PUBLIC

@@ -15,6 +15,12 @@ FetchContent_MakeAvailable(googletest)
 # --- Test executable ---
 add_executable(netudp_tests
     test_init.cpp
+    test_simd.cpp
+)
+
+# Tests need access to internal src/ headers for SIMD dispatch testing
+target_include_directories(netudp_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
 )
 
 target_link_libraries(netudp_tests PRIVATE
