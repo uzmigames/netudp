@@ -1,6 +1,7 @@
 #include <netudp/netudp.h>
 #include "core/platform.h"
 #include "simd/netudp_simd.h"
+#include "socket/socket.h"
 
 #include <atomic>
 
@@ -14,6 +15,11 @@ int netudp_init(void) {
         return NETUDP_OK;
     }
     g_detected_simd_level = netudp::simd::detect_and_set();
+    int sock_err = netudp::socket_platform_init();
+    if (sock_err != NETUDP_OK) {
+        g_initialized.store(false);
+        return sock_err;
+    }
     return NETUDP_OK;
 }
 
@@ -21,6 +27,7 @@ void netudp_term(void) {
     if (!g_initialized.exchange(false)) {
         return;
     }
+    netudp::socket_platform_term();
     netudp::simd::g_simd = nullptr;
     g_detected_simd_level = NETUDP_SIMD_GENERIC;
 }

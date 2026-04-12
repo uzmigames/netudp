@@ -26,6 +26,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 add_library(netudp STATIC
     src/api.cpp
     src/core/address.cpp
+    src/socket/socket.cpp
     src/simd/netudp_simd_detect.cpp
     src/simd/simd_generic.cpp
     src/simd/simd_sse42.cpp
