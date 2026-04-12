@@ -28,6 +28,7 @@ add_executable(netudp_tests
     test_simd_all_impls.cpp
     test_coverage_extra.cpp
     test_handshake.cpp
+    test_reliability.cpp
 )
 
 # Tests need access to internal src/ headers for SIMD dispatch testing
