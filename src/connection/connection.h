@@ -25,7 +25,7 @@
 
 namespace netudp {
 
-static constexpr int MAX_CHANNELS_PER_CONNECTION = 32;
+static constexpr int MAX_CHANNELS_PER_CONNECTION = 4;
 
 /** Delivered message waiting for app to pick up via netudp_server_receive. */
 struct DeliveredMessage {

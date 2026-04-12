@@ -34,7 +34,7 @@ struct ReceivedMessage {
     bool     valid = false;
 };
 
-static constexpr int RELIABLE_BUFFER_SIZE = 512;
+static constexpr int RELIABLE_BUFFER_SIZE = 64;
 static constexpr int MAX_RETRIES = 10;
 
 class ReliableChannelState {

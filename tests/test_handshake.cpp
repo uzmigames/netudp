@@ -44,7 +44,7 @@ TEST_F(HandshakeTest, FullConnectionFlow) {
 
     netudp_server_t* server = netudp_server_create("127.0.0.1:19400", &server_cfg, 1000.0);
     ASSERT_NE(server, nullptr);
-    netudp_server_start(server, 64);
+    netudp_server_start(server, 4);
 
     /* Generate connect token */
     uint8_t token[2048] = {};

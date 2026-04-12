@@ -6,14 +6,19 @@
 #include "socket/socket.h"
 #include "crypto/packet_crypto.h"
 #include "crypto/random.h"
-#include "crypto/xchacha.h"
-#include "core/address.h"
 #include "crypto/vendor/monocypher.h"
+#include "core/address.h"
+#include "wire/frame.h"
+#include "reliability/packet_tracker.h"
 
 #include <cstring>
 #include <new>
+#include <algorithm>
 
-/* Opaque struct defined at global scope to match forward decl in netudp_types.h */
+/* ======================================================================
+ * Client struct — global scope to match forward decl in netudp_types.h
+ * ====================================================================== */
+
 struct netudp_client {
     netudp::ClientState state = netudp::ClientState::DISCONNECTED;
 
@@ -31,17 +36,29 @@ struct netudp_client {
     uint8_t client_to_server_key[32] = {};
     uint8_t server_to_client_key[32] = {};
 
-    netudp::crypto::KeyEpoch key_epoch;
+    /* Full connection state with all subsystems */
+    netudp::Connection conn;
+
     int     client_index = -1;
     int     max_clients = 0;
 
     double  connect_start_time = 0.0;
     double  last_send_time = 0.0;
-    double  last_recv_time = 0.0;
     double  current_time = 0.0;
 
     uint8_t recv_buf[NETUDP_MAX_PACKET_ON_WIRE] = {};
+    uint8_t send_buf[NETUDP_MAX_PACKET_ON_WIRE] = {};
 };
+
+/* Internal functions */
+namespace netudp {
+void client_send_pending(netudp_client* client);
+void client_handle_data_packet(netudp_client* client, const uint8_t* packet, int packet_len);
+}
+
+/* ======================================================================
+ * Extern "C" API
+ * ====================================================================== */
 
 extern "C" {
 
@@ -117,10 +134,12 @@ void netudp_client_connect(netudp_client_t* client, uint8_t connect_token[2048])
     pos += 32;
     std::memcpy(client->server_to_client_key, connect_token + pos, 32);
 
-    std::memcpy(client->key_epoch.tx_key, client->client_to_server_key, 32);
-    std::memcpy(client->key_epoch.rx_key, client->server_to_client_key, 32);
-    client->key_epoch.tx_nonce_counter = 0;
-    client->key_epoch.replay.reset();
+    /* Setup connection with all subsystems */
+    std::memcpy(client->conn.key_epoch.tx_key, client->client_to_server_key, 32);
+    std::memcpy(client->conn.key_epoch.rx_key, client->server_to_client_key, 32);
+    client->conn.key_epoch.tx_nonce_counter = 0;
+    client->conn.key_epoch.replay.reset();
+    client->conn.init_subsystems(client->config.channels, client->config.num_channels, client->current_time);
 
     client->current_server_index = 0;
     client->state = netudp::ClientState::SENDING_REQUEST;
@@ -132,47 +151,32 @@ void netudp_client_update(netudp_client_t* client, double time) {
     if (client == nullptr) {
         return;
     }
+    double dt = time - client->current_time;
     client->current_time = time;
 
     if (client->state == netudp::ClientState::SENDING_REQUEST) {
         if (time - client->last_send_time > 0.1) {
             /*
              * CONNECTION_REQUEST (1078 bytes):
-             *   prefix(1) = 0x00
-             *   version_info(13) — from token offset 0
-             *   protocol_id(8)   — from token offset 13
-             *   expire_ts(8)     — from token offset 29 (skip create_ts at 21)
-             *   nonce(24)        — from token offset 37
-             *   encrypted_private(1024+16=1040) — from token offset 61
-             *   Total: 1 + 13 + 8 + 8 + 24 + 1040 = 1094... but spec says 1078.
-             *   That means encrypted_private is 1024 (not 1040). The tag is part of it.
-             *   Actually: 1 + 13 + 8 + 8 + 24 + 1024 = 1078. The encrypted block
-             *   is 1024 bytes (plaintext size, Poly1305 tag is INSIDE that 1024).
-             *   Wait no — private is 1024 plaintext → 1024+16=1040 encrypted.
-             *   1 + 13 + 8 + 8 + 24 + 1024 = 1078 means we send 1024 of the 1040.
-             *   Actually the spec says encrypted_private is 1024, and the token stores
-             *   1024+16=1040 bytes at TOKEN_PRIVATE_OFFSET. For the REQUEST we send
-             *   all 1040 bytes: 1+13+8+8+24+1040 = 1094. But spec says 1078...
-             *   Let me just match: prefix(1)+version(13)+protocol(8)+expire(8)+nonce(24)+1024 = 1078
-             *   The 1024 here includes the encrypted data + mac (since private plaintext
-             *   is 1024-16=1008 bytes to leave room for mac inside the 1024 allocation).
-             *   For simplicity: send 1078 bytes total from token data.
+             *   prefix(1)=0x00 + version(13) + protocol_id(8) + expire_ts(8)
+             *   + nonce(24) + encrypted_private(1024)
+             * Note: create_ts (token offset 21, 8 bytes) is NOT sent on wire.
              */
             uint8_t request[1078];
-            int pos = 0;
-            request[pos++] = 0x00; /* prefix */
-            std::memcpy(request + pos, client->connect_token + 0, 13); /* version */
-            pos += 13;
-            std::memcpy(request + pos, client->connect_token + 13, 8); /* protocol_id */
-            pos += 8;
-            /* Skip create_ts (token offset 21, 8 bytes) */
-            std::memcpy(request + pos, client->connect_token + 29, 8); /* expire_ts */
-            pos += 8;
-            std::memcpy(request + pos, client->connect_token + 37, 24); /* nonce */
-            pos += 24;
-            /* encrypted_private: token offset 61, copy enough to fill 1078 total */
-            int remaining = 1078 - pos; /* 1078 - 54 = 1024 */
-            std::memcpy(request + pos, client->connect_token + 61, static_cast<size_t>(remaining));
+            int rpos = 0;
+            request[rpos++] = 0x00;
+            std::memcpy(request + rpos, client->connect_token + 0, 13);  /* version */
+            rpos += 13;
+            std::memcpy(request + rpos, client->connect_token + 13, 8);  /* protocol_id */
+            rpos += 8;
+            /* Skip create_ts at token offset 21 (8 bytes) */
+            std::memcpy(request + rpos, client->connect_token + 29, 8);  /* expire_ts */
+            rpos += 8;
+            std::memcpy(request + rpos, client->connect_token + 37, 24); /* nonce */
+            rpos += 24;
+            int priv_bytes = 1078 - rpos; /* = 1024 */
+            std::memcpy(request + rpos, client->connect_token + 61,
+                        static_cast<size_t>(priv_bytes));
 
             const netudp_address_t* dest = &client->server_addresses[client->current_server_index];
             netudp::socket_send(&client->socket, dest, request, 1078);
@@ -190,12 +194,46 @@ void netudp_client_update(netudp_client_t* client, double time) {
     }
 
     if (client->state == netudp::ClientState::CONNECTED) {
-        if (time - client->last_recv_time > client->timeout_seconds) {
+        /* Bandwidth refill */
+        client->conn.bandwidth.refill(time);
+        client->conn.budget.refill(dt, client->conn.congestion.send_rate());
+
+        /* Send pending channel data */
+        netudp::client_send_pending(client);
+
+        /* Keepalive */
+        if (time - client->conn.last_send_time > 1.0) {
+            uint8_t payload[8];
+            netudp::AckFields ack = client->conn.packet_tracker.build_ack_fields(time);
+            netudp::write_ack_fields(ack, payload);
+            client->conn.packet_tracker.send_packet(time);
+
+            uint8_t prefix = 0x15;
+            uint8_t ct[64];
+            int ct_len = netudp::crypto::packet_encrypt(
+                &client->conn.key_epoch, client->protocol_id, prefix, payload, 8, ct);
+            if (ct_len > 0) {
+                client->send_buf[0] = prefix;
+                std::memcpy(client->send_buf + 1, ct, static_cast<size_t>(ct_len));
+                const netudp_address_t* dest = &client->server_addresses[client->current_server_index];
+                netudp::socket_send(&client->socket, dest, client->send_buf, 1 + ct_len);
+                client->conn.last_send_time = time;
+            }
+        }
+
+        /* Timeout */
+        if (time - client->conn.last_recv_time > client->timeout_seconds) {
             client->state = netudp::ClientState::CONNECTION_TIMED_OUT;
             return;
         }
+
+        /* Stats + congestion */
+        client->conn.stats.update_throughput(time);
+        client->conn.congestion.evaluate();
+        client->conn.fragment_reassembler.cleanup_timeout(time);
     }
 
+    /* Receive packets */
     for (int recv_iter = 0; recv_iter < 64; ++recv_iter) {
         netudp_address_t from = {};
         int received = netudp::socket_recv(&client->socket, &from,
@@ -208,22 +246,22 @@ void netudp_client_update(netudp_client_t* client, double time) {
         uint8_t packet_type = prefix & 0x0F;
 
         if (packet_type == 0x05 && client->state == netudp::ClientState::SENDING_REQUEST) {
+            /* KEEPALIVE — connection accepted */
             int header_len = 1;
             uint8_t payload[64] = {};
             int pt_len = netudp::crypto::packet_decrypt(
-                &client->key_epoch, client->protocol_id, prefix,
-                0,
-                client->recv_buf + header_len,
-                received - header_len,
-                payload
-            );
+                &client->conn.key_epoch, client->protocol_id, prefix,
+                0, client->recv_buf + header_len, received - header_len, payload);
 
             if (pt_len >= 8) {
                 std::memcpy(&client->client_index, payload, 4);
                 std::memcpy(&client->max_clients, payload + 4, 4);
                 client->state = netudp::ClientState::CONNECTED;
-                client->last_recv_time = time;
+                client->conn.last_recv_time = time;
+                client->conn.active = true;
             }
+        } else if (packet_type >= 0x04 && client->state == netudp::ClientState::CONNECTED) {
+            netudp::client_handle_data_packet(client, client->recv_buf, received);
         }
     }
 }
@@ -234,6 +272,7 @@ void netudp_client_disconnect(netudp_client_t* client) {
     }
     client->state = netudp::ClientState::DISCONNECTED;
     client->client_index = -1;
+    client->conn.active = false;
 }
 
 void netudp_client_destroy(netudp_client_t* client) {
@@ -243,6 +282,7 @@ void netudp_client_destroy(netudp_client_t* client) {
     netudp::socket_destroy(&client->socket);
     crypto_wipe(client->client_to_server_key, 32);
     crypto_wipe(client->server_to_client_key, 32);
+    client->conn.reset();
     delete client;
 }
 
@@ -254,34 +294,273 @@ int netudp_client_state(const netudp_client_t* client) {
 }
 
 int netudp_client_send(netudp_client_t* client,
-                       int /*channel*/, const void* data, int bytes, int /*flags*/) {
+                       int channel, const void* data, int bytes, int flags) {
     if (client == nullptr || client->state != netudp::ClientState::CONNECTED) {
         return NETUDP_ERROR_NOT_CONNECTED;
     }
-
-    uint8_t packet[NETUDP_MAX_PACKET_ON_WIRE];
-    uint8_t prefix = 0x14;
-    packet[0] = prefix;
-
-    uint8_t ct[NETUDP_MTU];
-    int ct_len = netudp::crypto::packet_encrypt(&client->key_epoch, client->protocol_id, prefix,
-                                                 static_cast<const uint8_t*>(data), bytes, ct);
-    if (ct_len < 0) {
-        return NETUDP_ERROR_CRYPTO;
+    if (channel < 0 || channel >= client->conn.num_channels) {
+        return NETUDP_ERROR_INVALID_PARAM;
     }
 
-    std::memcpy(packet + 1, ct, static_cast<size_t>(ct_len));
-    const netudp_address_t* dest = &client->server_addresses[client->current_server_index];
-    netudp::socket_send(&client->socket, dest, packet, 1 + ct_len);
+    if (!client->conn.channels[channel].queue_send(
+            static_cast<const uint8_t*>(data), bytes, flags)) {
+        return NETUDP_ERROR_NO_BUFFERS;
+    }
+    client->conn.channels[channel].start_nagle(client->current_time);
+
+    if ((flags & NETUDP_SEND_NO_DELAY) != 0) {
+        client->conn.channels[channel].flush();
+        netudp::client_send_pending(client);
+    }
 
     return NETUDP_OK;
 }
 
-int netudp_client_receive(netudp_client_t* /*client*/,
-                          netudp_message_t** /*messages*/, int /*max_messages*/) {
-    return 0;
+int netudp_client_receive(netudp_client_t* client,
+                          netudp_message_t** messages, int max_messages) {
+    if (client == nullptr || messages == nullptr ||
+        client->state != netudp::ClientState::CONNECTED) {
+        return 0;
+    }
+
+    int count = 0;
+    while (count < max_messages && !client->conn.delivered_messages.is_empty()) {
+        netudp::DeliveredMessage dmsg;
+        if (!client->conn.delivered_messages.pop_front(&dmsg)) {
+            break;
+        }
+        if (!dmsg.valid) {
+            continue;
+        }
+
+        auto* msg = static_cast<netudp_message_t*>(std::malloc(sizeof(netudp_message_t)));
+        if (msg == nullptr) {
+            break;
+        }
+        msg->data = std::malloc(static_cast<size_t>(dmsg.size));
+        if (msg->data == nullptr) {
+            std::free(msg);
+            break;
+        }
+        std::memcpy(msg->data, dmsg.data, static_cast<size_t>(dmsg.size));
+        msg->size = dmsg.size;
+        msg->channel = dmsg.channel;
+        msg->client_index = client->client_index;
+        msg->flags = 0;
+        msg->message_number = dmsg.sequence;
+        msg->receive_time_us = 0;
+
+        messages[count++] = msg;
+    }
+
+    return count;
 }
 
-void netudp_client_flush(netudp_client_t* /*client*/) {}
+void netudp_client_flush(netudp_client_t* client) {
+    if (client == nullptr || client->state != netudp::ClientState::CONNECTED) {
+        return;
+    }
+    for (int ch = 0; ch < client->conn.num_channels; ++ch) {
+        client->conn.channels[ch].flush();
+    }
+    netudp::client_send_pending(client);
+}
 
 } /* extern "C" */
+
+/* ======================================================================
+ * Internal: Send pending data from channels
+ * ====================================================================== */
+
+namespace netudp {
+
+void client_send_pending(netudp_client* client) {
+    Connection& conn = client->conn;
+    double now = client->current_time;
+
+    if (!conn.budget.can_send()) {
+        return;
+    }
+
+    int ch_idx = ChannelScheduler::next_channel(conn.channels, conn.num_channels, now);
+    while (ch_idx >= 0) {
+        QueuedMessage qmsg;
+        if (!conn.channels[ch_idx].dequeue_send(&qmsg)) {
+            break;
+        }
+
+        uint8_t payload[NETUDP_MTU];
+        int payload_pos = 0;
+
+        AckFields ack = conn.packet_tracker.build_ack_fields(now);
+        payload_pos += write_ack_fields(ack, payload + payload_pos);
+
+        uint8_t ch_type = conn.channels[ch_idx].type();
+        int frame_len = 0;
+
+        if (ch_type == NETUDP_CHANNEL_RELIABLE_ORDERED || ch_type == NETUDP_CHANNEL_RELIABLE_UNORDERED) {
+            uint16_t pkt_seq = conn.packet_tracker.send_sequence();
+            conn.reliable_state[ch_idx].record_send(qmsg.data, qmsg.size, pkt_seq, now);
+            frame_len = wire::write_reliable_frame(
+                payload + payload_pos, NETUDP_MTU - payload_pos,
+                static_cast<uint8_t>(ch_idx), qmsg.sequence, qmsg.data, qmsg.size);
+        } else {
+            frame_len = wire::write_unreliable_frame(
+                payload + payload_pos, NETUDP_MTU - payload_pos,
+                static_cast<uint8_t>(ch_idx), qmsg.data, qmsg.size);
+        }
+
+        if (frame_len < 0) {
+            break;
+        }
+        payload_pos += frame_len;
+
+        conn.packet_tracker.send_packet(now);
+
+        uint8_t prefix = 0x14;
+        uint8_t ct[NETUDP_MAX_PACKET_ON_WIRE];
+        int ct_len = crypto::packet_encrypt(&conn.key_epoch, client->protocol_id, prefix,
+                                             payload, payload_pos, ct);
+        if (ct_len < 0) {
+            break;
+        }
+
+        client->send_buf[0] = prefix;
+        std::memcpy(client->send_buf + 1, ct, static_cast<size_t>(ct_len));
+        int total = 1 + ct_len;
+
+        const netudp_address_t* dest = &client->server_addresses[client->current_server_index];
+        socket_send(&client->socket, dest, client->send_buf, total);
+        conn.last_send_time = now;
+        conn.stats.on_packet_sent(total);
+        conn.budget.consume(total);
+
+        ch_idx = ChannelScheduler::next_channel(conn.channels, conn.num_channels, now);
+        if (!conn.budget.can_send()) {
+            break;
+        }
+    }
+}
+
+/* ======================================================================
+ * Internal: Handle data packet (same logic as server side)
+ * ====================================================================== */
+
+void client_handle_data_packet(netudp_client* client, const uint8_t* packet, int packet_len) {
+    Connection& conn = client->conn;
+    if (packet_len < 2) {
+        return;
+    }
+
+    uint8_t prefix = packet[0];
+    int header_len = 1;
+
+    uint64_t expected_nonce = conn.key_epoch.replay.most_recent + 1;
+
+    uint8_t plaintext[NETUDP_MAX_PACKET_ON_WIRE];
+    int pt_len = crypto::packet_decrypt(
+        &conn.key_epoch, client->protocol_id, prefix,
+        expected_nonce, packet + header_len, packet_len - header_len, plaintext);
+
+    if (pt_len < 0) {
+        conn.stats.decrypt_failures++;
+        return;
+    }
+
+    conn.last_recv_time = client->current_time;
+    conn.stats.on_packet_received(packet_len);
+
+    if (pt_len < 8) {
+        return;
+    }
+
+    AckFields ack_fields = read_ack_fields(plaintext);
+    int newly_acked = conn.packet_tracker.process_acks(ack_fields);
+    for (int i = 0; i < newly_acked; ++i) {
+        conn.congestion.on_packet_acked();
+    }
+
+    double send_time = conn.packet_tracker.get_send_time(ack_fields.ack);
+    if (send_time > 0.0) {
+        conn.rtt.on_sample(send_time, client->current_time, ack_fields.ack_delay_us);
+        conn.congestion.on_rtt_sample();
+    }
+
+    conn.packet_tracker.on_packet_received(0, client->current_time);
+
+    int pos = 8;
+    while (pos < pt_len) {
+        uint8_t frame_type = plaintext[pos++];
+
+        if (frame_type == wire::FRAME_UNRELIABLE_DATA && pos + 3 <= pt_len) {
+            uint8_t ch = plaintext[pos++];
+            uint16_t msg_len = 0;
+            std::memcpy(&msg_len, plaintext + pos, 2);
+            pos += 2;
+            if (pos + msg_len > pt_len || ch >= conn.num_channels) {
+                break;
+            }
+            DeliveredMessage dmsg;
+            std::memcpy(dmsg.data, plaintext + pos, msg_len);
+            dmsg.size = msg_len;
+            dmsg.channel = ch;
+            dmsg.valid = true;
+            conn.delivered_messages.push_back(dmsg);
+            conn.stats.messages_received++;
+            pos += msg_len;
+
+        } else if (frame_type == wire::FRAME_RELIABLE_DATA && pos + 5 <= pt_len) {
+            uint8_t ch = plaintext[pos++];
+            uint16_t msg_seq = 0;
+            std::memcpy(&msg_seq, plaintext + pos, 2);
+            pos += 2;
+            uint16_t msg_len = 0;
+            std::memcpy(&msg_len, plaintext + pos, 2);
+            pos += 2;
+            if (pos + msg_len > pt_len || ch >= conn.num_channels) {
+                break;
+            }
+
+            uint8_t ch_type = conn.channels[ch].type();
+            if (ch_type == NETUDP_CHANNEL_RELIABLE_ORDERED) {
+                if (conn.reliable_state[ch].buffer_received_ordered(msg_seq, plaintext + pos, msg_len)) {
+                    conn.reliable_state[ch].deliver_ordered(
+                        [&](const uint8_t* data, int len, uint16_t seq) {
+                            DeliveredMessage dm;
+                            int copy_len = std::min(len, static_cast<int>(NETUDP_MTU));
+                            std::memcpy(dm.data, data, static_cast<size_t>(copy_len));
+                            dm.size = copy_len;
+                            dm.channel = ch;
+                            dm.sequence = seq;
+                            dm.valid = true;
+                            conn.delivered_messages.push_back(dm);
+                            conn.stats.messages_received++;
+                        });
+                }
+            } else if (ch_type == NETUDP_CHANNEL_RELIABLE_UNORDERED) {
+                if (!conn.reliable_state[ch].is_received_unordered(msg_seq)) {
+                    conn.reliable_state[ch].mark_received_unordered(msg_seq);
+                    DeliveredMessage dm;
+                    int copy_len = std::min(static_cast<int>(msg_len), static_cast<int>(NETUDP_MTU));
+                    std::memcpy(dm.data, plaintext + pos, static_cast<size_t>(copy_len));
+                    dm.size = copy_len;
+                    dm.channel = ch;
+                    dm.sequence = msg_seq;
+                    dm.valid = true;
+                    conn.delivered_messages.push_back(dm);
+                    conn.stats.messages_received++;
+                }
+            }
+            pos += msg_len;
+
+        } else if (frame_type == wire::FRAME_DISCONNECT) {
+            client->state = ClientState::DISCONNECTED;
+            conn.active = false;
+            return;
+        } else {
+            break;
+        }
+    }
+}
+
+} // namespace netudp
