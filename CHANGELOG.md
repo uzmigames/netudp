@@ -72,3 +72,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Connection stats: 30+ fields (ping, quality, throughput EMA, reliability, fragments, security)
 - Channel stats: messages/bytes/pending per channel
 - Server stats: connected clients, total PPS/bandwidth, DDoS severity
+- Network simulator: NetSimConfig (latency_ms, jitter_ms, loss_percent, duplicate_percent, reorder_percent, incoming_lag_ms), ring-buffer packet delay queue, per-packet RNG for loss/dup/reorder, enable per-server/client via config flag
+- `netudp_server_set_packet_handler()`: per-packet-type dispatch table (256 slots, uint8 key), called from recv pipeline with (ctx, client_index, data, size, channel)
+- Buffer acquire/send API: `netudp_server_acquire_buffer()` from pre-allocated pool, `netudp_server_send_buffer()` queues and auto-returns buffer to pool after flush
+- Buffer write helpers: write_u8/u16/u32/u64/f32/f64/varint/bytes/string with bounds checking and position advance
+- Buffer read helpers: read_u8/u16/u32/u64/f32/f64/varint with bounds checking, returns 0 on overflow
+- Broadcast helpers: `netudp_server_broadcast()` and `netudp_server_broadcast_except()` send to all connected clients or all except one
+- Automatic rekeying: threshold detection (nonce ≥ 2^30, bytes ≥ 1 GB, epoch ≥ 1 h), Blake2b-keyed KDF (`crypto_blake2b_keyed`), prepare/activate split for zero-downtime rekey, grace window (256 old-key packets accepted after rekey before zeroing)
+- Benchmark suite: bench_pps (packets/sec, 64B encrypted unreliable), bench_latency (RTT histogram, p50/p95/p99/max), bench_simd_compare (CRC32C/memcpy/ack_scan/replay_check across generic/SSE4.2/AVX2), bench_scalability (PPS vs 1/4/16 clients), bench_memory (RSS delta for 1024 connections)
+- Benchmark runner: JSON output (`--json`), human-readable table, configurable warmup/runs/filter, `BenchRegistry` singleton
+- CI benchmark regression: `.github/workflows/bench.yml` runs bench_pps + bench_latency on every push, compares against cached baseline, fails if regression &gt; 5%

@@ -58,6 +58,14 @@ void netudp_server_broadcast_except(netudp_server_t* server, int except_client,
 void netudp_server_flush(netudp_server_t* server, int client_index);
 void netudp_client_flush(netudp_client_t* client);
 
+/* --- Packet handler dispatch --- */
+
+/* Register a callback for messages whose first byte equals packet_type.
+ * Matching messages are delivered to fn instead of the normal receive queue.
+ * Pass fn=NULL to unregister.  Max 256 handlers (packet_type 0-255). */
+void netudp_server_set_packet_handler(netudp_server_t* server, uint16_t packet_type,
+                                      netudp_packet_handler_fn fn, void* ctx);
+
 /* --- Receive --- */
 
 int  netudp_server_receive(netudp_server_t* server, int client_index,

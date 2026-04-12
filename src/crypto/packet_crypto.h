@@ -18,13 +18,26 @@
 namespace netudp {
 namespace crypto {
 
+/* -----------------------------------------------------------------------
+ * Rekey thresholds and constants (spec 04, REQ-04.7)
+ * --------------------------------------------------------------------- */
+
+static constexpr uint64_t REKEY_NONCE_THRESHOLD  = 1ULL << 30; /* 2^30 packets */
+static constexpr uint64_t REKEY_BYTES_THRESHOLD  = 1ULL << 30; /* 1 GB         */
+static constexpr double   REKEY_EPOCH_SECONDS    = 3600.0;     /* 1 hour       */
+static constexpr int      REKEY_GRACE_PACKETS    = 256;
+static constexpr uint8_t  PACKET_PREFIX_DATA_REKEY = 0x0CU;    /* 0x04 | 0x08 */
+
 struct KeyEpoch {
     uint8_t  tx_key[32] = {};
     uint8_t  rx_key[32] = {};
+    uint8_t  old_rx_key[32] = {};        /* saved rx_key during grace window  */
     uint64_t tx_nonce_counter = 0;
     uint64_t bytes_transmitted = 0;
     double   epoch_start_time = 0.0;
     uint32_t epoch_number = 0;
+    int      grace_packets_remaining = 0; /* countdown: accept old-key packets */
+    bool     rekey_pending = false;       /* set flag on next outgoing packet   */
     ReplayProtection replay;
 };
 
@@ -42,6 +55,43 @@ inline int build_aad(uint64_t protocol_id, uint8_t prefix_byte, uint8_t aad[22])
     aad[NETUDP_VERSION_INFO_BYTES + 8] = prefix_byte;
     return 22;
 }
+
+/* -----------------------------------------------------------------------
+ * Rekey functions (spec 04, REQ-04.7)
+ * --------------------------------------------------------------------- */
+
+/** Returns true when rekey thresholds are exceeded. */
+bool should_rekey(const KeyEpoch& epoch, double current_time);
+
+/**
+ * Prepare rekey: compute new keys into pending storage and set rekey_pending.
+ * Call this when should_rekey() returns true.  The sender will emit the
+ * REKEY-flagged packet (encrypted with old tx_key), then call activate_rekey().
+ * Increments epoch_number and saves old_rx_key for the grace window.
+ */
+void prepare_rekey(KeyEpoch& epoch);
+
+/**
+ * Activate rekey: switch to new keys, reset nonce + replay, start grace window.
+ * Call AFTER the REKEY-flagged packet has been encrypted (old tx_key still used).
+ */
+void activate_rekey(KeyEpoch& epoch, double current_time);
+
+/**
+ * Receiver-side rekey: derive new keys using the same formula.
+ * Call when a packet with PACKET_PREFIX_DATA_REKEY is received and
+ * successfully decrypted.  Saves old_rx_key for the grace window.
+ */
+void on_receive_rekey(KeyEpoch& epoch, double current_time);
+
+/**
+ * Try to decrypt with old_rx_key (grace window fallback).
+ * Returns plaintext length, or -1 on failure.
+ * Decrements grace_packets_remaining on success.
+ */
+int packet_decrypt_grace(KeyEpoch* epoch, uint64_t protocol_id, uint8_t prefix_byte,
+                         uint64_t nonce_counter, const uint8_t* ct, int ct_len,
+                         uint8_t* pt);
 
 /**
  * Encrypt a packet payload.

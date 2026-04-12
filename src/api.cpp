@@ -80,12 +80,17 @@ netudp_buffer_t* netudp_server_acquire_buffer(netudp_server_t* /*server*/) {
 
 int netudp_server_send_buffer(netudp_server_t* server, int client_index,
                               int channel, netudp_buffer_t* buf, int flags) {
-    if (server == nullptr || buf == nullptr) {
+    if (buf == nullptr) {
         return NETUDP_ERROR_INVALID_PARAM;
     }
-    int result = netudp_server_send(server, client_index, channel,
-                                     buf->data, buf->position, flags);
-    /* Release buffer */
+
+    int result = NETUDP_ERROR_INVALID_PARAM;
+    if (server != nullptr) {
+        result = netudp_server_send(server, client_index, channel,
+                                    buf->data, buf->position, flags);
+    }
+
+    /* Always release buffer back to pool regardless of send outcome */
     for (int i = 0; i < 64; ++i) {
         if (&g_buffer_pool[i] == buf) {
             g_buffer_in_use[i] = false;

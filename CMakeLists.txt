@@ -41,6 +41,7 @@ add_library(netudp STATIC
     src/api.cpp
     src/server.cpp
     src/client.cpp
+    src/sim/network_sim.cpp
     src/core/address.cpp
     src/connection/connect_token.cpp
     src/socket/socket.cpp
@@ -75,6 +76,8 @@ target_compile_definitions(netudp PRIVATE
     $<$<BOOL:${NETUDP_CRC32_ONLY}>:NETUDP_CRC32_ONLY=1>
     $<$<BOOL:${NETUDP_ENABLE_AVX512}>:NETUDP_ENABLE_AVX512=1>
     $<$<BOOL:${NETUDP_HAS_NETC}>:NETUDP_HAS_NETC=1>
+    $<$<CXX_COMPILER_ID:MSVC>:NOMINMAX>
+    $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>
 )
 
 # Platform-specific link libraries

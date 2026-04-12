@@ -1,0 +1,151 @@
+name: Benchmarks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    name: Benchmark regression check
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (Release + bench enabled)
+        run: |
+          cmake -B build_bench \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DNETUDP_BUILD_BENCH=ON \
+            -DNETUDP_BUILD_TESTS=OFF \
+            -DCMAKE_C_COMPILER=gcc-12 \
+            -DCMAKE_CXX_COMPILER=g++-12
+
+      - name: Build
+        run: cmake --build build_bench --config Release -j 4
+
+      - name: Restore baseline
+        id: cache-baseline
+        uses: actions/cache/restore@v4
+        with:
+          path: bench_baseline.json
+          key: bench-baseline-${{ runner.os }}-${{ github.base_ref || 'main' }}
+
+      - name: Run benchmarks (pps + latency)
+        run: |
+          build_bench/bench/netudp_bench \
+            --bench pps \
+            --warmup 2 \
+            --runs 20 \
+            --json bench_results_pps.json
+          build_bench/bench/netudp_bench \
+            --bench latency \
+            --warmup 2 \
+            --runs 100 \
+            --json bench_results_latency.json
+
+      - name: Merge JSON results
+        run: |
+          python3 - <<'EOF'
+          import json, glob
+          merged = []
+          for path in sorted(glob.glob("bench_results_*.json")):
+              with open(path) as f:
+                  merged.extend(json.load(f))
+          with open("bench_results.json", "w") as f:
+              json.dump(merged, f, indent=2)
+          EOF
+
+      - name: Compare against baseline
+        run: |
+          python3 - <<'EOF'
+          import json, sys, os
+
+          THRESHOLDS = {
+              # Absolute minimums (CI environment, Release build, loopback UDP)
+              "pps_1client":   {"min_ops_per_sec": 5000},   # 5K PPS floor
+              "latency_rtt":   {"max_p99_ns":  200_000_000},# 200ms p99 max
+          }
+          REGRESSION_PCT = 5.0  # fail if metric regresses >5% vs baseline
+
+          with open("bench_results.json") as f:
+              current = {r["name"]: r for r in json.load(f)}
+
+          # Baseline comparison (optional — only if baseline exists)
+          baseline = {}
+          if os.path.exists("bench_baseline.json"):
+              with open("bench_baseline.json") as f:
+                  baseline = {r["name"]: r for r in json.load(f)}
+              print(f"Baseline loaded: {list(baseline.keys())}")
+          else:
+              print("No baseline found — establishing first baseline.")
+
+          failed = False
+          for name, thresh in THRESHOLDS.items():
+              if name not in current:
+                  print(f"WARN: {name} not found in results")
+                  continue
+              res = current[name]
+
+              # Absolute threshold checks
+              if "min_ops_per_sec" in thresh:
+                  actual = res["ops_per_sec"]
+                  limit  = thresh["min_ops_per_sec"]
+                  status = "PASS" if actual >= limit else "FAIL"
+                  print(f"[{status}] {name} ops/sec={actual:.0f} >= {limit}")
+                  if actual < limit:
+                      failed = True
+
+              if "max_p99_ns" in thresh:
+                  actual = res["p99_ns"]
+                  limit  = thresh["max_p99_ns"]
+                  status = "PASS" if actual <= limit else "FAIL"
+                  print(f"[{status}] {name} p99={actual:.0f}ns <= {limit}ns")
+                  if actual > limit:
+                      failed = True
+
+              # Regression check vs baseline
+              if name in baseline:
+                  b = baseline[name]
+                  # ops_per_sec: higher is better
+                  if b["ops_per_sec"] > 0 and res["ops_per_sec"] > 0:
+                      change_pct = (b["ops_per_sec"] - res["ops_per_sec"]) \
+                                   / b["ops_per_sec"] * 100.0
+                      if change_pct > REGRESSION_PCT:
+                          print(f"[REGRESSION] {name} ops/sec dropped "
+                                f"{change_pct:.1f}% vs baseline")
+                          failed = True
+                      else:
+                          print(f"[OK] {name} ops/sec change: {-change_pct:.1f}%")
+                  # p99_ns: lower is better
+                  if b["p99_ns"] > 0 and res["p99_ns"] > 0:
+                      change_pct = (res["p99_ns"] - b["p99_ns"]) \
+                                   / b["p99_ns"] * 100.0
+                      if change_pct > REGRESSION_PCT:
+                          print(f"[REGRESSION] {name} p99 increased "
+                                f"{change_pct:.1f}% vs baseline")
+                          failed = True
+
+          sys.exit(1 if failed else 0)
+          EOF
+
+      - name: Save new baseline (main branch only)
+        if: github.ref == 'refs/heads/main' && success()
+        run: cp bench_results.json bench_baseline.json
+
+      - name: Store baseline in cache
+        if: github.ref == 'refs/heads/main' && success()
+        uses: actions/cache/save@v4
+        with:
+          path: bench_baseline.json
+          key: bench-baseline-${{ runner.os }}-main
+
+      - name: Upload results as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results-${{ github.sha }}
+          path: bench_results.json
+          retention-days: 90

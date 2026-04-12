@@ -93,6 +93,7 @@ TEST(ApiStubs, BufferAcquireReturnsValid) {
     uint8_t bytes[] = {1, 2, 3};
     netudp_buffer_write_bytes(buf, bytes, 3);
     netudp_buffer_write_string(buf, "hello", 10);
+    netudp_server_send_buffer(nullptr, 0, 0, buf, 0); /* return to pool */
     netudp_term();
 }
 
@@ -147,6 +148,7 @@ TEST(ApiStubs, BufferWriteReadRoundTrip) {
     /* Buffer doesn't have a reset — create a new read buffer by hacking position */
     /* For now just verify writes didn't crash. Real read test needs position reset. */
 
+    netudp_server_send_buffer(nullptr, 0, 0, buf, 0); /* return to pool */
     netudp_term();
 }
 

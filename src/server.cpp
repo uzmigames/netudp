@@ -14,6 +14,7 @@
 #include "core/allocator.h"
 #include "wire/frame.h"
 #include "reliability/packet_tracker.h"
+#include "sim/network_sim.h"
 
 #include <cstring>
 #include <ctime>
@@ -56,6 +57,13 @@ struct netudp_server {
 
     uint8_t recv_buf[NETUDP_MAX_PACKET_ON_WIRE] = {};
     uint8_t send_buf[NETUDP_MAX_PACKET_ON_WIRE] = {};
+
+    netudp::NetworkSimulator sim;
+    bool sim_enabled = false;
+
+    /* Packet handler dispatch table — indexed by first byte of message (0-255) */
+    netudp_packet_handler_fn packet_handlers[256] = {};
+    void*                    packet_handler_ctx[256] = {};
 };
 
 /* Forward declarations for internal functions */
@@ -105,6 +113,13 @@ netudp_server_t* netudp_server_create(const char* address,
         return nullptr;
     }
 
+    /* Wire network simulator if a config was provided. */
+    if (config->sim_config != nullptr) {
+        server->sim.init(
+            *static_cast<const netudp::NetSimConfig*>(config->sim_config));
+        server->sim_enabled = true;
+    }
+
     return server;
 }
 
@@ -143,6 +158,47 @@ void netudp_server_stop(netudp_server_t* server) {
     }
 }
 
+/* Dispatch a fully-received (or sim-delivered) packet to the correct handler. */
+static void server_dispatch_packet(netudp_server* server,
+                                   const netudp_address_t* from,
+                                   const uint8_t* data, int len) {
+    uint8_t prefix      = data[0];
+    uint8_t packet_type = prefix & 0x0F;
+
+    if (packet_type == 0x00 && len == 1078) {
+        if (!server->ddos.should_process_new_connection()) {
+            return;
+        }
+        netudp::server_handle_connection_request(server, from, data, len);
+    } else if ((packet_type >= 0x04 && packet_type <= 0x06) ||
+               prefix == netudp::crypto::PACKET_PREFIX_DATA_REKEY) {
+        int slot = -1;
+        for (int i = 0; i < server->max_clients; ++i) {
+            if (server->connections[i].active &&
+                netudp_address_equal(&server->connections[i].address, from)) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot >= 0) {
+            netudp::server_handle_data_packet(server, slot, data, len);
+        } else {
+            server->ddos.on_bad_packet();
+        }
+    } else {
+        server->ddos.on_bad_packet();
+    }
+}
+
+/* Callback adapter for NetworkSimulator::poll(). */
+struct SimDispatchCtx { netudp_server* server; };
+
+static void sim_deliver_cb(void* ctx, const uint8_t* data, int len,
+                            const netudp_address_t* from) {
+    auto* dc = static_cast<SimDispatchCtx*>(ctx);
+    server_dispatch_packet(dc->server, from, data, len);
+}
+
 void netudp_server_update(netudp_server_t* server, double time) {
     if (server == nullptr || !server->running) {
         return;
@@ -169,33 +225,18 @@ void netudp_server_update(netudp_server_t* server, double time) {
             continue;
         }
 
-        uint8_t prefix = server->recv_buf[0];
-        uint8_t packet_type = prefix & 0x0F;
-
-        if (packet_type == 0x00 && received == 1078) {
-            /* CONNECTION_REQUEST */
-            if (!server->ddos.should_process_new_connection()) {
-                continue;
-            }
-            netudp::server_handle_connection_request(server, &from, server->recv_buf, received);
-        } else if (packet_type >= 0x04 && packet_type <= 0x06) {
-            /* DATA / KEEPALIVE / DISCONNECT — find connection by address */
-            int slot = -1;
-            for (int i = 0; i < server->max_clients; ++i) {
-                if (server->connections[i].active &&
-                    netudp_address_equal(&server->connections[i].address, &from)) {
-                    slot = i;
-                    break;
-                }
-            }
-            if (slot >= 0) {
-                netudp::server_handle_data_packet(server, slot, server->recv_buf, received);
-            } else {
-                server->ddos.on_bad_packet();
-            }
+        if (server->sim_enabled) {
+            /* Hand the packet to the simulator; it will deliver later via poll(). */
+            server->sim.submit(server->recv_buf, received, &from, time);
         } else {
-            server->ddos.on_bad_packet();
+            server_dispatch_packet(server, &from, server->recv_buf, received);
         }
+    }
+
+    /* Drain simulator-buffered packets that are now due. */
+    if (server->sim_enabled) {
+        SimDispatchCtx dc{server};
+        server->sim.poll(time, &dc, sim_deliver_cb);
     }
 
     /* Per-connection: send pending, keepalive, timeout, stats */
@@ -320,6 +361,18 @@ int netudp_server_receive(netudp_server_t* server, int client_index,
             continue;
         }
 
+        /* Packet handler dispatch: if first byte matches a registered handler,
+         * invoke it directly and skip the normal app-facing message queue.    */
+        if (dmsg.size >= 1) {
+            uint8_t ptype = dmsg.data[0];
+            netudp_packet_handler_fn handler = server->packet_handlers[ptype];
+            if (handler != nullptr) {
+                handler(server->packet_handler_ctx[ptype],
+                        client_index, dmsg.data, dmsg.size, dmsg.channel);
+                continue; /* consumed — do not expose to app */
+            }
+        }
+
         /* Allocate a message struct for the app */
         auto* msg = static_cast<netudp_message_t*>(std::malloc(sizeof(netudp_message_t)));
         if (msg == nullptr) {
@@ -395,6 +448,15 @@ void netudp_server_flush(netudp_server_t* server, int client_index) {
         conn.channels[ch].flush();
     }
     netudp::server_send_pending(server, client_index);
+}
+
+void netudp_server_set_packet_handler(netudp_server_t* server, uint16_t packet_type,
+                                      netudp_packet_handler_fn fn, void* ctx) {
+    if (server == nullptr || packet_type > 255) {
+        return;
+    }
+    server->packet_handlers[packet_type] = fn;
+    server->packet_handler_ctx[packet_type] = ctx;
 }
 
 } /* extern "C" */
@@ -542,9 +604,22 @@ void server_handle_data_packet(netudp_server* server, int slot,
     );
 
     if (pt_len < 0) {
-        conn.stats.decrypt_failures++;
-        server->ddos.on_bad_packet();
-        return;
+        /* Grace window: try old_rx_key for 256 packets after peer rekeyed */
+        pt_len = crypto::packet_decrypt_grace(
+            &conn.key_epoch, server->protocol_id, prefix,
+            expected_nonce,
+            packet + header_len, packet_len - header_len, plaintext
+        );
+        if (pt_len < 0) {
+            conn.stats.decrypt_failures++;
+            server->ddos.on_bad_packet();
+            return;
+        }
+    }
+
+    /* REKEY packet: peer has rekeyed — derive new keys on our side */
+    if (prefix == crypto::PACKET_PREFIX_DATA_REKEY) {
+        crypto::on_receive_rekey(conn.key_epoch, server->current_time);
     }
 
     conn.last_recv_time = server->current_time;
@@ -739,13 +814,25 @@ void server_send_pending(netudp_server* server, int slot) {
         /* Record packet send (return value is the sequence, used for ack matching) */
         conn.packet_tracker.send_packet(now);
 
-        /* Encrypt */
-        uint8_t prefix = 0x14; /* DATA, 1-byte seq */
+        /* Rekey detection — trigger on threshold, use old tx_key for REKEY packet */
+        if (crypto::should_rekey(conn.key_epoch, now) && !conn.key_epoch.rekey_pending) {
+            crypto::prepare_rekey(conn.key_epoch);
+        }
+
+        /* Encrypt — uses old tx_key; prefix signals rekey to receiver */
+        uint8_t prefix = conn.key_epoch.rekey_pending
+                         ? crypto::PACKET_PREFIX_DATA_REKEY
+                         : static_cast<uint8_t>(0x14);
         uint8_t ct[NETUDP_MAX_PACKET_ON_WIRE];
         int ct_len = crypto::packet_encrypt(&conn.key_epoch, server->protocol_id, prefix,
                                              payload, payload_pos, ct);
         if (ct_len < 0) {
             break;
+        }
+
+        /* Switch to new keys AFTER encrypting with old tx_key */
+        if (conn.key_epoch.rekey_pending) {
+            crypto::activate_rekey(conn.key_epoch, now);
         }
 
         /* Assemble wire packet */

@@ -7,8 +7,13 @@
  *        All types are POD structs suitable for FFI.
  */
 
-#include <stdint.h>
+#ifdef __cplusplus
+#include <cstddef>
+#include <cstdint>
+#else
 #include <stddef.h>
+#include <stdint.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -16,18 +21,18 @@ extern "C" {
 
 /* --- Error codes --- */
 
-#define NETUDP_OK                     0
-#define NETUDP_ERROR_INVALID_PARAM   -1
-#define NETUDP_ERROR_SOCKET          -2
-#define NETUDP_ERROR_NO_BUFFERS      -3
-#define NETUDP_ERROR_CONNECTION_FULL -4
-#define NETUDP_ERROR_NOT_CONNECTED   -5
-#define NETUDP_ERROR_MSG_TOO_LARGE   -6
-#define NETUDP_ERROR_CRYPTO          -7
-#define NETUDP_ERROR_TIMEOUT         -8
-#define NETUDP_ERROR_WINDOW_FULL     -9
-#define NETUDP_ERROR_COMPRESSION    -10
-#define NETUDP_ERROR_NOT_INITIALIZED -11
+#define NETUDP_OK                     (0)
+#define NETUDP_ERROR_INVALID_PARAM   (-1)
+#define NETUDP_ERROR_SOCKET          (-2)
+#define NETUDP_ERROR_NO_BUFFERS      (-3)
+#define NETUDP_ERROR_CONNECTION_FULL (-4)
+#define NETUDP_ERROR_NOT_CONNECTED   (-5)
+#define NETUDP_ERROR_MSG_TOO_LARGE   (-6)
+#define NETUDP_ERROR_CRYPTO          (-7)
+#define NETUDP_ERROR_TIMEOUT         (-8)
+#define NETUDP_ERROR_WINDOW_FULL     (-9)
+#define NETUDP_ERROR_COMPRESSION    (-10)
+#define NETUDP_ERROR_NOT_INITIALIZED (-11)
 
 /* --- Send flags --- */
 
@@ -87,6 +92,8 @@ typedef struct netudp_message {
 typedef void (*netudp_connect_fn)(void* ctx, int client_index, uint64_t client_id,
                                    const uint8_t user_data[256]);
 typedef void (*netudp_disconnect_fn)(void* ctx, int client_index, int reason);
+typedef void (*netudp_packet_handler_fn)(void* ctx, int client_index,
+                                          const void* data, int size, int channel);
 
 /* --- Channel config --- */
 
@@ -130,6 +137,9 @@ typedef struct netudp_server_config {
     /* Compression (optional) */
     const void* compression_dict; /* netc_dict_t*, NULL = no compression */
     uint8_t     compression_level;
+
+    /* Network simulator (optional, NULL disables) */
+    const void* sim_config; /* NetSimConfig*, NULL = disabled */
 
     /* Logging */
     int  log_level;
