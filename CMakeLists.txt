@@ -18,10 +18,10 @@ option(NETUDP_BUILD_BENCH "Build benchmarks" OFF)
 option(NETUDP_BUILD_EXAMPLES "Build examples" OFF)
 option(NETUDP_ENABLE_AVX512 "Enable AVX-512 SIMD (experimental)" OFF)
 option(NETUDP_CRC32_ONLY "CRC32C-only mode for LAN/dev (no AEAD encryption)" OFF)
-option(NETUDP_ENABLE_NETC "Enable netc compression integration" OFF)
+option(NETUDP_DISABLE_NETC "Disable netc compression (not recommended)" OFF)
 
-# --- Optional: netc compression library ---
-if(NETUDP_ENABLE_NETC)
+# --- netc compression library (default ON) ---
+if(NOT NETUDP_DISABLE_NETC)
     include(FetchContent)
     FetchContent_Declare(
         netc
@@ -30,6 +30,7 @@ if(NETUDP_ENABLE_NETC)
         GIT_SHALLOW    TRUE
     )
     FetchContent_MakeAvailable(netc)
+    set(NETUDP_HAS_NETC TRUE)
 endif()
 
 # Export compile_commands.json for clang-tidy
@@ -73,7 +74,7 @@ target_include_directories(netudp
 target_compile_definitions(netudp PRIVATE
     $<$<BOOL:${NETUDP_CRC32_ONLY}>:NETUDP_CRC32_ONLY=1>
     $<$<BOOL:${NETUDP_ENABLE_AVX512}>:NETUDP_ENABLE_AVX512=1>
-    $<$<BOOL:${NETUDP_ENABLE_NETC}>:NETUDP_HAS_NETC=1>
+    $<$<BOOL:${NETUDP_HAS_NETC}>:NETUDP_HAS_NETC=1>
 )
 
 # Platform-specific link libraries
@@ -81,10 +82,19 @@ if(WIN32)
     target_link_libraries(netudp PRIVATE ws2_32 bcrypt)
 endif()
 
-# netc compression (optional)
-if(NETUDP_ENABLE_NETC)
+# netc compression (default ON)
+if(NETUDP_HAS_NETC)
     target_link_libraries(netudp PRIVATE netc)
     target_include_directories(netudp PRIVATE ${netc_SOURCE_DIR}/include)
+
+    # Fix: Zig CC needs -mxsave for __builtin_ia32_xgetbv in netc SIMD detection
+    if(NOT MSVC AND TARGET netc)
+        set_source_files_properties(
+            ${netc_SOURCE_DIR}/src/simd/netc_simd_generic.c
+            TARGET_DIRECTORY netc
+            PROPERTIES COMPILE_FLAGS "-mxsave"
+        )
+    endif()
 endif()
 
 # Compiler warnings
@@ -117,7 +127,6 @@ endif()
 include(GNUInstallDirs)
 
 install(TARGETS netudp
-    EXPORT netudpTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
@@ -125,10 +134,4 @@ install(TARGETS netudp
 
 install(DIRECTORY include/netudp/
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/netudp
-)
-
-install(EXPORT netudpTargets
-    FILE netudpTargets.cmake
-    NAMESPACE netudp::
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/netudp
 )
