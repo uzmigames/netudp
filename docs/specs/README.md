@@ -22,3 +22,13 @@ Detailed specs for every module. Each spec contains: requirements (SHALL/MUST), 
 | [13](13-public-api.md) | Public API (extern "C") | Lifecycle, send/recv, flags, handlers, callbacks, buffer, token gen |
 | [14](14-benchmarks.md) | Benchmark Suite | 12 benchmarks, targets, CI regression, SIMD comparison rule |
 | [15](15-network-simulator.md) | Network Simulator | Latency, jitter, loss, duplicate, reorder, incoming lag |
+
+### SDK & Engine Integration Specs
+
+| # | Spec | Scope |
+|---|---|---|
+| [16](16-sdk-cpp-wrapper.md) | C++ Wrapper (sdk/cpp) | RAII Server/Client/Message, BufferWriter fluent API, BufferReader, ConnectToken |
+| [17](17-sdk-uzengine.md) | UzEngine Integration | NetworkingSubsystem (ISubsystem), EventQueue, PoolAllocator, ECS components |
+| [18](18-sdk-unreal.md) | Unreal Engine 5 Plugin | UGameInstanceSubsystem, Blueprint API, dynamic delegates, platform libs |
+| [19](19-sdk-unity.md) | Unity C# Bindings | P/Invoke, NativeArray zero-GC pattern, NetudpServer/Client wrappers |
+| [20](20-sdk-godot.md) | Godot 4 GDExtension | GDScript API, signals, PackedByteArray, connect token generation |

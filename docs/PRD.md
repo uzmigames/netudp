@@ -79,7 +79,7 @@ None offers a single, zero-GC, SIMD-accelerated, easy-to-integrate library with 
 ### FR-4: Fragmentation
 - FR-4.1: Transparent split/reassemble for messages > MTU
 - FR-4.2: Fragment-level bitmask tracking (retransmit only lost fragments)
-- FR-4.3: Max message size configurable (default 64KB, up to 512KB)
+- FR-4.3: Max message size configurable (default 64KB, up to 288KB — limited by 255 fragments × MTU payload)
 - FR-4.4: Fragment timeout with cleanup (default 5s)
 
 ### FR-5: Encryption

@@ -6,15 +6,20 @@
 
 Every outgoing data packet SHALL include:
 
+**Clear header (unencrypted, see spec 09 REQ-09.2):**
+- `sequence` (1-8 bytes, variable-length): this packet's sequence (wraps at 65535)
+
+**Ack fields (inside encrypted payload, 8 bytes):**
 ```cpp
-struct PacketHeader {
-    uint16_t sequence;       // This packet's sequence (wraps at 65535)
+struct AckFields {
     uint16_t ack;            // Highest received sequence from remote
     uint32_t ack_bits;       // Bitmask: bit N = received (ack - N - 1)
     uint16_t ack_delay_us;   // Microseconds since receiving 'ack'
 };
-// Total: 10 bytes (inside encrypted payload)
+// Total: 8 bytes (inside encrypted payload, first bytes after decryption)
 ```
+
+**Note:** The `sequence` field is NOT inside the encrypted payload — it is in the clear header (spec 09 REQ-09.2) and is authenticated indirectly via the AEAD nonce (spec 04 REQ-04.3). Only the ack fields (8 bytes) are inside the encrypted payload.
 
 - `sequence` SHALL increment monotonically per connection per direction
 - `ack` SHALL be the highest packet sequence received from the remote
@@ -23,17 +28,37 @@ struct PacketHeader {
 
 ### REQ-07.2: Sequence Window Protection
 
-The sender SHALL NOT send if `sequence - oldest_unacked >= 256`.
-This prevents overflowing the ack window. When the window is full:
-1. Only keepalive packets (empty, with ack header) are sent
+The sender SHALL NOT send if `sequence - oldest_unacked >= 33`.
+This aligns the send window with the `ack_bits` coverage: the `ack` field plus 32 bits covers exactly 33 packets. Packets beyond this range are invisible to the receiver's ack bitmask and cannot be acknowledged.
+
+When the window is full:
+1. Only keepalive packets (empty, with ack fields) are sent
 2. Application send calls return `NETUDP_ERROR_WINDOW_FULL`
 3. Stats counter `window_stalls` is incremented
+
+**Rationale:** The previous window of 256 was incompatible with the 32-bit `ack_bits` field, which can only report on 33 packets (ack + 32 prior). A 256-packet window would leave 223 packets unacknowledgeable. The window of 33 matches the ack coverage exactly. If higher throughput is needed, `ack_bits` can be extended to `uint64_t` (64-bit, covering 65 packets) as a future enhancement.
 
 ### REQ-07.3: Layer 2 — Per-Channel Message Reliability
 
 Each reliable channel SHALL maintain:
 
 ```cpp
+struct SentMessage {
+    uint16_t sequence;
+    uint16_t packet_sequence;  // Which packet carried this message
+    double   send_time;
+    int      retry_count;
+    int      data_offset;      // Offset into send pool
+    int      data_len;
+};
+
+struct ReceivedMessage {
+    uint16_t sequence;
+    int      data_offset;      // Offset into recv pool
+    int      data_len;
+    bool     valid;            // Slot occupied
+};
+
 struct ChannelReliabilityState {
     uint16_t send_seq;           // Next message sequence to assign
     uint16_t recv_seq;           // Next expected from remote
@@ -45,16 +70,13 @@ struct ChannelReliabilityState {
     // Out-of-order received messages (reliable ordered only)
     FixedRingBuffer<ReceivedMessage, 512> recv_buffer;
 };
-
-struct SentMessage {
-    uint16_t sequence;
-    uint16_t packet_sequence;  // Which packet carried this message
-    double   send_time;
-    int      retry_count;
-    int      data_offset;      // Offset into send pool
-    int      data_len;
-};
 ```
+
+**Receive path by channel type:**
+
+- **Reliable Ordered:** Messages received out-of-order are stored in `recv_buffer` by sequence. Messages are delivered to the application only when `recv_seq` is contiguous (i.e., `recv_buffer[recv_seq]` is valid). Delivery advances `recv_seq` and delivers consecutive buffered messages.
+
+- **Reliable Unordered:** Messages are delivered to the application **immediately** upon receipt (no reorder buffer needed). The `recv_buffer` is NOT used. Instead, a 512-bit bitmask tracks which sequences have been received to detect and drop duplicates. `recv_seq` tracks the oldest undelivered sequence for bitmask window advancement.
 
 When a packet is NACKed (not in ack_bits):
 1. Determine which messages were in that packet (via `packet_sequence` mapping)
@@ -80,6 +102,8 @@ First sample: `srtt = sample`, `rttvar = sample / 2`.
 - Max retries: 10. After that: message dropped, `stats.messages_dropped++`
 - Retransmitted messages are embedded in the next regular outgoing packet (not a separate retransmit packet)
 
+**Timeline cross-reference:** With `rto` maxed at 2000ms and exponent capped at 5, the max effective RTO is 64s. At 10 max retries, the worst-case total retransmit duration is ~127s (sum of geometric series). The connection timeout (spec 05, default 10s) and keepalive interval (1000ms, REQ-07.7) will detect a dead connection well before the 10th retry. In practice, a connection timeout fires after 10s of no acks, which caps the effective retries to ~5-6 at typical RTOs.
+
 ### REQ-07.6: Stop-Waiting
 
 Periodically (every 32 packets or when ack window > 50% full), include a stop-waiting frame:
@@ -98,18 +122,9 @@ If no data packet has been sent within `keepalive_interval` (default: 1000ms):
 
 ### REQ-07.8: Replay Protection
 
-```cpp
-struct ReplayProtection {
-    uint64_t most_recent;
-    uint64_t received[256];
+Replay protection is defined in spec 04 REQ-04.9. It operates on the 64-bit nonce counter (not the 16-bit wire sequence). See spec 04 for the `ReplayProtection` struct, rejection rules, and wraparound safety guarantees.
 
-    bool already_received(uint64_t seq) const;
-    void advance(uint64_t seq);
-    void reset();
-};
-```
-
-Applied to all encrypted packets BEFORE decryption attempt (sequence is in clear header).
+Applied to all encrypted packets BEFORE decryption attempt. The 64-bit nonce counter is derived from the packet's position in the key epoch (mapped from the wire sequence + epoch state).
 
 ## Scenarios
 

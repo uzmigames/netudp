@@ -394,19 +394,19 @@ Rule: No SIMD path is merged without a benchmark showing ≥ 20% improvement
 
 ```
 bench/
-├── bench_main.c               // Benchmark runner + reporter
-├── bench_pps.c                // Packets per second (send/recv loop)
-├── bench_latency.c            // End-to-end latency histogram
-├── bench_crc32c.c             // CRC32C throughput (generic vs SSE vs AVX)
-├── bench_aead.c               // AEAD encrypt/decrypt throughput
-├── bench_buffer_pool.c        // Pool acquire/release throughput
-├── bench_ack_processing.c     // Ack bitmask scan + reliability update
-├── bench_fragment.c           // Fragment reassembly
-├── bench_connection_lookup.c  // Address hash map lookup
-├── bench_nagle.c              // Batching throughput
-├── bench_full_pipeline.c      // End-to-end with all layers
-├── bench_scalability.c        // PPS vs connection count
-└── bench_simd_compare.c       // Side-by-side: generic vs SSE vs AVX vs NEON
+├── bench_main.cpp               // Benchmark runner + reporter
+├── bench_pps.cpp                // Packets per second (send/recv loop)
+├── bench_latency.cpp            // End-to-end latency histogram
+├── bench_crc32c.cpp             // CRC32C throughput (generic vs SSE vs AVX)
+├── bench_aead.cpp               // AEAD encrypt/decrypt throughput
+├── bench_buffer_pool.cpp        // Pool acquire/release throughput
+├── bench_ack_processing.cpp     // Ack bitmask scan + reliability update
+├── bench_fragment.cpp           // Fragment reassembly
+├── bench_connection_lookup.cpp  // Address hash map lookup
+├── bench_nagle.cpp              // Batching throughput
+├── bench_full_pipeline.cpp      // End-to-end with all layers
+├── bench_scalability.cpp        // PPS vs connection count
+└── bench_simd_compare.cpp       // Side-by-side: generic vs SSE vs AVX vs NEON
 ```
 
 ### 4.4 CI Benchmark Regression
@@ -494,7 +494,7 @@ SIMD comparison (ack_bits_scan, 32 bits):
 │ Fragmentation Layer                                               │
 │   Split/reassemble for messages > MTU                             │
 │   Fragment bitmask tracking, configurable timeout                 │
-│   Max message: 64KB default, 512KB configurable (matches GNS)    │
+│   Max message: 64KB default, 288KB configurable (255 frags × MTU)│
 ├──────────────────────────────────────────────────────────────────┤
 │ Encryption Layer (AEAD)                                           │
 │   ChaCha20-Poly1305 (default) or AES-256-GCM (compile-time)      │
@@ -1008,13 +1008,17 @@ typedef struct {
 
 ### 12.2 Per-Connection Bandwidth (from UE5 QueuedBits pattern)
 
-Each connection tracks `queued_bits`. Per tick:
+Each connection tracks `queued_bits` (positive = over budget, negative = available). See **spec 10 REQ-10.2** for the canonical formulation:
 ```cpp
-allowed_bits += (send_rate_bytes_per_sec * 8) * delta_time;
-queued_bits -= allowed_bits;
-if (queued_bits > 0) {
-    // Bandwidth exceeded — defer remaining sends to next tick
-}
+// Per tick:
+queued_bits -= (int32_t)(send_rate_bps * delta_time);
+queued_bits = max(queued_bits, -burst_bits);
+
+// Per send:
+queued_bits += packet_size_bytes * 8;
+
+// Defer when over budget:
+if (queued_bits > 0) { /* defer remaining sends to next tick */ }
 ```
 
 This is UE5's `QueuedBits` / `CurrentNetSpeed` pattern, which provides smooth bandwidth distribution per connection without global contention.
@@ -1034,43 +1038,67 @@ UE5 has no active congestion control (just token bucket). netudp adds AIMD (Addi
 The library estimates channel capacity and exposes it in statistics:
 
 ```cpp
-stats.send_rate_bytes_per_sec  // Estimated usable capacity
-stats.queue_time_us            // How long data waits before being sent
-stats.congestion_window_bytes  // Current CWND
+stats.send_rate_bytes_per_sec      // Current allowed send rate (after congestion control)
+stats.max_send_rate_bytes_per_sec  // Configured maximum send rate
+stats.queue_time_us                // How long data waits before being sent
 ```
 
 ---
 
 ## 13. Connection Statistics (from GNS)
 
+The canonical definition of `netudp_connection_stats_t` is in **spec 12 REQ-12.1**. Summary of fields:
+
 ```c
 typedef struct {
     // Timing
-    uint32_t ping_ms;                    // Current RTT
-    float    connection_quality_local;   // 0..1 (packet delivery rate)
-    float    connection_quality_remote;  // 0..1 (as seen by remote)
+    uint32_t ping_ms;                     // Current RTT (smoothed)
+    float    connection_quality_local;     // 0..1 (packet delivery rate, local)
+    float    connection_quality_remote;    // 0..1 (as reported by remote)
 
     // Throughput
     float    out_packets_per_sec;
     float    out_bytes_per_sec;
     float    in_packets_per_sec;
     float    in_bytes_per_sec;
-    uint32_t send_rate_bytes_per_sec;    // Estimated channel capacity
+
+    // Capacity
+    uint32_t send_rate_bytes_per_sec;     // Current allowed send rate
+    uint32_t max_send_rate_bytes_per_sec; // Configured maximum
 
     // Queue depth
     uint32_t pending_unreliable_bytes;
     uint32_t pending_reliable_bytes;
     uint32_t sent_unacked_reliable_bytes;
-    uint64_t queue_time_us;              // Estimated wait before send
+    uint64_t queue_time_us;
 
-    // Compression (if netc enabled)
-    float    compression_ratio;          // bytes_out / bytes_in
-    uint64_t bytes_saved;                // Total bytes saved by compression
+    // Reliability
+    uint32_t packets_sent;
+    uint32_t packets_received;
+    uint32_t packets_lost;
+    uint32_t packets_out_of_order;
+    uint32_t messages_sent;
+    uint32_t messages_received;
+    uint32_t messages_dropped;
+    uint32_t window_stalls;
 
-    // Per-channel stats
-    netudp_channel_stats_t channels[NETUDP_MAX_CHANNELS];
+    // Fragments
+    uint32_t fragments_sent;
+    uint32_t fragments_received;
+    uint32_t fragments_retransmitted;
+    uint32_t fragments_timed_out;
+
+    // Compression
+    float    compression_ratio;
+    uint64_t compression_bytes_saved;
+
+    // Security
+    uint32_t replay_attacks_blocked;
+    uint32_t decrypt_failures;
 } netudp_connection_stats_t;
 ```
+
+Per-channel stats are queried separately via `netudp_server_channel_status()` (spec 12 REQ-12.4), not embedded in the connection stats struct.
 
 ---
 
@@ -1178,7 +1206,9 @@ typedef struct {
     void *   (*allocate_function)(void *, size_t);
     void     (*free_function)(void *, void *);
     void *   callback_context;                  // Callback user data
-    void     (*connect_disconnect_callback)(void *, int client_index, int connected);
+    void     (*on_connect)(void * ctx, int client_index, uint64_t client_id,
+                           const uint8_t user_data[256]);
+    void     (*on_disconnect)(void * ctx, int client_index, int reason);
     netudp_channel_config_t channels[NETUDP_MAX_CHANNELS];
     int      num_channels;                      // Default: 4
     const netc_dict_t * compression_dict;       // NULL = no compression
@@ -1502,9 +1532,11 @@ All public types follow strict rules for bindability:
 
 ```c
 // ✅ POD structs only (no function pointers in data types passed across FFI)
+// (simplified example — full struct in spec 12 REQ-12.1)
 typedef struct {
     uint32_t ping_ms;
-    float    quality;
+    float    connection_quality_local;
+    // ... 30+ fields, see spec 12 for full definition
 } netudp_connection_stats_t;
 
 // ✅ Opaque handles (not raw pointers) for lifetime safety
@@ -1685,7 +1717,7 @@ func _on_packet_received(client_index: int, channel: int, data: PackedByteArray)
 ### Phase 4: Fragmentation + Large Messages
 - Message splitting at MTU boundary
 - Fragment bitmask tracking and reassembly
-- Configurable max message size (default 64KB, up to 512KB)
+- Configurable max message size (default 64KB, up to 288KB — limited by 255 fragments × MTU payload)
 - Fragment timeout and cleanup
 
 ### Phase 5: Compression + Statistics

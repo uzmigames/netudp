@@ -20,18 +20,29 @@ Default: 256 KB/s rate, 32 KB burst. Configurable per connection.
 
 ### REQ-10.2: QueuedBits Per-Connection Budget
 
-```cpp
-int32_t queued_bits;  // Tracks budget per tick
+**Canonical formulation** (used by both this spec and architecture doc):
 
-// Each tick:
-queued_bits -= (send_rate_bps * delta_time);
-queued_bits = max(queued_bits, -burst_bits);  // Allow negative = available budget
+```cpp
+int32_t queued_bits = 0;  // Positive = over budget, negative = available budget
+
+// Each tick (called once per update):
+void budget_refill(float delta_time) {
+    queued_bits -= (int32_t)(send_rate_bps * delta_time);
+    queued_bits = max(queued_bits, -burst_bits);  // Cap available budget
+}
 
 // Each send:
-queued_bits += packet_size_bits;
+void budget_consume(int packet_size_bytes) {
+    queued_bits += packet_size_bytes * 8;
+}
 
-// If queued_bits > 0: defer remaining sends to next tick
+// Check: if queued_bits > 0, defer remaining sends to next tick
+bool can_send() const { return queued_bits <= 0; }
 ```
+
+- `queued_bits` starts at 0. Each tick subtracts the allowed budget (send rate × delta). Each send adds the packet size in bits.
+- When `queued_bits > 0`, the connection has exceeded its budget and must wait.
+- `burst_bits = burst_bytes * 8` (from REQ-10.1 TokenBucket). The `max()` clamp prevents unlimited credit accumulation during idle periods.
 
 ### REQ-10.3: AIMD Congestion Control
 

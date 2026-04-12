@@ -25,10 +25,12 @@ When `message_size > max_payload_per_packet`:
 ### REQ-08.3: Maximum Message Size
 
 ```cpp
-static constexpr int MAX_FRAGMENT_COUNT = 255;  // uint8_t fragment_index
+static constexpr int MAX_FRAGMENT_COUNT = 255;          // uint8_t max (indices 0..254)
 static constexpr int DEFAULT_MAX_MESSAGE_SIZE = 64 * 1024;   // 64 KB
-static constexpr int ABSOLUTE_MAX_MESSAGE_SIZE = 512 * 1024; // 512 KB
+static constexpr int ABSOLUTE_MAX_MESSAGE_SIZE = 288 * 1024; // 288 KB
 ```
+
+**Size constraint:** `fragment_count` is `uint8_t`, valid range `[1, 255]` (0 is invalid). `fragment_index` is `uint8_t`, range `[0, fragment_count-1]`. At MTU=1200 with typical overhead (prefix=1, seq=2, conn_id=4, fragment_header=4, AEAD_tag=16), `max_fragment_payload ≈ 1150 bytes`. Maximum achievable message: `255 × 1150 = 293,250 bytes ≈ 286 KB`. The `ABSOLUTE_MAX_MESSAGE_SIZE` is set to 288 KB to reflect this physical limit. Implementations SHALL reject configurations where `max_message_size > MAX_FRAGMENT_COUNT × max_fragment_payload`.
 
 Configurable per channel via `ChannelConfig.max_message_size`.
 Channels with `max_message_size = 0` do not support fragmentation (messages > MTU rejected).
@@ -71,10 +73,12 @@ This is an improvement over UE5 (which retransmits all fragments on any loss).
 Pre-allocated per connection:
 ```cpp
 // Per connection: max_concurrent_fragments reassembly slots
-// Each slot: max_message_size bytes
+// Each slot sized to the channel's configured max_message_size (NOT ABSOLUTE_MAX)
 FixedRingBuffer<FragmentTracker, 16> active_reassemblies;
-Pool<uint8_t[MAX_MESSAGE_SIZE]> reassembly_buffers;
+Pool<uint8_t[]> reassembly_buffers;  // Pool element size = channel's max_message_size
 ```
+
+The reassembly pool element size SHALL match the per-channel `ChannelConfig.max_message_size`, not `ABSOLUTE_MAX_MESSAGE_SIZE`. This prevents wasting memory (e.g., 288 KB per slot) for channels configured with a lower limit (e.g., 64 KB). Each channel's reassembly pool is sized independently based on its configuration.
 
 ### REQ-08.7: Fragment Timeout
 

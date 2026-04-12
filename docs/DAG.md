@@ -138,21 +138,15 @@ Task dependency graph for implementation. Each node can only start when ALL its 
 │  All tests pass, benchmarks meet targets   │
 └──────────────────┬────────────────────────┘
                    │
-     ┌─────────────┼──────────────────┐
-     ▼             ▼                  ▼
-┌──────────┐ ┌──────────────┐ ┌──────────────┐
-│ P8-A:    │ │ P8-B: Unreal │ │ P8-C: Unity  │
-│ C++ RAII │ │ Plugin       │ │ C# Bindings  │
-│ Wrapper  │ │              │ │              │
-└──────────┘ └──────────────┘ └──────────────┘
-                                     │
-                              ┌──────┴───────┐
-                              ▼              ▼
-                       ┌──────────┐  ┌──────────────┐
-                       │ P8-D:    │  │ P8-E:        │
-                       │ Godot    │  │ UzEngine     │
-                       │ GDExt    │  │ Subsystem    │
-                       └──────────┘  └──────────────┘
+     ┌─────────┬──────────┬──────────┬──────────┐
+     ▼         ▼          ▼          ▼          ▼
+┌──────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌──────────────┐
+│ P8-A:    │ │ P8-B:  │ │ P8-C:  │ │ P8-D:  │ │ P8-E:        │
+│ C++ RAII │ │ Unreal │ │ Unity  │ │ Godot  │ │ UzEngine     │
+│ Wrapper  │ │ Plugin │ │ C# API │ │ GDExt  │ │ Subsystem    │
+└──────────┘ └────────┘ └────────┘ └────────┘ └──────────────┘
+     ↑                                              ↑
+  (P7-D)     (P7-D)      (P7-D)    (P7-D)       (P8-A)
 ```
 
 ---

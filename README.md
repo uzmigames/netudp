@@ -15,7 +15,7 @@ High-performance, zero-GC UDP networking library for game servers.
 - **Connect tokens** — secure authentication via encrypted tokens (netcode.io protocol). No online key exchange needed.
 - **4 channel types** — unreliable, unreliable sequenced, reliable ordered, reliable unordered. Priority + weight scheduling.
 - **Reliability** — piggybacked acks with delay field for continuous RTT. RTT-adaptive retransmission.
-- **Fragmentation** — transparent split/reassemble for messages up to 512KB
+- **Fragmentation** — transparent split/reassemble for messages up to 288KB
 - **Encryption** — ChaCha20-Poly1305 AEAD by default. AES-256-GCM compile-time option. Replay protection (256-entry window).
 - **Compression** — optional [netc](https://github.com/uzmigames/netc) integration (35-67% bandwidth savings on game packets)
 - **Nagle + flush** — automatic batching with per-message bypass. Multi-frame packets (ack + data in one UDP packet).
@@ -65,10 +65,13 @@ cmake --build build-linux
 ├─────────────────────────────────────────────────┤
 │              netudp Public API                   │
 │  netudp_server_create / netudp_client_connect    │
-│  netudp_send / netudp_recv / netudp_poll         │
+│  netudp_server_send / netudp_server_receive      │
 ├─────────────────────────────────────────────────┤
 │            Channel Layer                         │
 │  reliable_ordered | reliable_unordered | unreliable│
+├─────────────────────────────────────────────────┤
+│         Compression Layer (optional)              │
+│  netc: stateful (reliable) | stateless (unreliable)│
 ├─────────────────────────────────────────────────┤
 │          Reliability Engine                       │
 │  sequence numbers | ack bitmask | retransmit     │
@@ -77,7 +80,7 @@ cmake --build build-linux
 │  split | reassemble | MTU discovery              │
 ├─────────────────────────────────────────────────┤
 │          Encryption Layer                         │
-│  AEAD (ChaCha20-Poly1305 or AES-128-GCM)        │
+│  AEAD (ChaCha20-Poly1305 or AES-256-GCM)        │
 ├─────────────────────────────────────────────────┤
 │         Connection Manager                        │
 │  handshake | heartbeat | timeout | bandwidth     │
@@ -129,34 +132,52 @@ netudp/
 ```c
 #include <netudp/netudp.h>
 
-// Server
-netudp_config_t config = netudp_default_config();
-config.max_connections = 1024;
-config.port = 27015;
-
-netudp_server_t* server = netudp_server_create(&config);
-
-while (running) {
-    netudp_event_t event;
-    while (netudp_server_poll(server, &event)) {
-        switch (event.type) {
-            case NETUDP_EVENT_CONNECT:
-                printf("Client connected: %u\n", event.connection_id);
-                break;
-            case NETUDP_EVENT_DATA:
-                // event.data, event.data_len, event.channel
-                netudp_server_send(server, event.connection_id,
-                                   NETUDP_CHANNEL_UNRELIABLE,
-                                   response, response_len);
-                break;
-            case NETUDP_EVENT_DISCONNECT:
-                printf("Client disconnected: %u\n", event.connection_id);
-                break;
-        }
-    }
+// Callbacks
+void on_connect(void* ctx, int client, uint64_t id, const uint8_t user_data[256]) {
+    printf("Client %d connected (id=%llu)\n", client, id);
 }
 
-netudp_server_destroy(server);
+void on_disconnect(void* ctx, int client, int reason) {
+    printf("Client %d disconnected (reason=%d)\n", client, reason);
+}
+
+int main() {
+    netudp_init();
+
+    // Configure server
+    netudp_server_config_t config = {0};
+    config.protocol_id = 0x1234567890ABCDEF;
+    config.num_channels = 4;
+    config.callback_context = NULL;
+    config.on_connect = on_connect;
+    config.on_disconnect = on_disconnect;
+    // config.private_key = ... (32 bytes, shared with backend)
+
+    netudp_server_t* server = netudp_server_create("0.0.0.0:27015", &config, 0.0);
+    netudp_server_start(server, 1024);
+
+    while (running) {
+        double time = get_time();  // Your monotonic clock
+        netudp_server_update(server, time);
+
+        // Receive messages per client
+        for (int c = 0; c < 1024; c++) {
+            netudp_message_t* msgs[64];
+            int count = netudp_server_receive(server, c, msgs, 64);
+            for (int i = 0; i < count; i++) {
+                // msgs[i]->data, msgs[i]->size, msgs[i]->channel
+                netudp_server_send(server, c, 0, msgs[i]->data,
+                                   msgs[i]->size, NETUDP_SEND_UNRELIABLE);
+                netudp_message_release(msgs[i]);
+            }
+        }
+    }
+
+    netudp_server_stop(server);
+    netudp_server_destroy(server);
+    netudp_term();
+    return 0;
+}
 ```
 
 ## License

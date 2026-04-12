@@ -48,15 +48,30 @@ int xchacha_decrypt(const uint8_t key[32], const uint8_t nonce[24],
 
 ### REQ-04.3: Nonce Construction
 
+The nonce SHALL use a **dedicated 64-bit counter per key epoch**, NOT the 16-bit packet sequence from the wire header. The packet header `sequence` (uint16_t, spec 07) wraps at 65535 and is insufficient for nonce uniqueness — at 1200 bytes/packet, rekey at 1GB means ~873K packets, which would cause ~13 nonce collisions with a 16-bit counter.
+
 ```cpp
-// Packet nonce: sequence zero-padded to 12 bytes
-void build_nonce(uint64_t sequence, uint8_t nonce[12]) {
+struct KeyEpoch {
+    uint8_t tx_key[32];
+    uint8_t rx_key[32];
+    uint64_t tx_nonce_counter;  // Monotonic per epoch, starts at 0
+    uint64_t rx_nonce_counter;  // For replay protection
+    uint64_t bytes_transmitted;
+    double   epoch_start_time;
+};
+
+// Packet nonce: 64-bit counter zero-padded to 12 bytes
+void build_nonce(uint64_t nonce_counter, uint8_t nonce[12]) {
     memset(nonce, 0, 12);
-    memcpy(nonce, &sequence, 8);  // Little-endian
+    memcpy(nonce, &nonce_counter, 8);  // Little-endian
 }
 ```
 
-Nonce is deterministic. Never reused because sequence is monotonically increasing per key.
+- The `tx_nonce_counter` is incremented for every encrypted packet sent.
+- The `rx_nonce_counter` tracks the highest received nonce for replay protection.
+- Nonce is deterministic. Never reused because `tx_nonce_counter` is monotonically increasing per key epoch.
+- The 16-bit `PacketHeader.sequence` (spec 07/09) is used only for ack/reliability, NOT for nonce construction.
+- The sequence field in the clear header is authenticated indirectly via the nonce (the nonce counter maps 1:1 to packet sequence within an epoch). Implementations SHALL NOT include the wire sequence in AAD to avoid double-counting.
 
 ### REQ-04.4: Key Management
 - **Tx key** (32 bytes): client→server direction. From connect token.
@@ -83,11 +98,24 @@ void random_bytes(uint8_t* data, int len);
 
 ### REQ-04.7: Automatic Rekeying
 
-When `bytes_transmitted >= 1GB` OR `session_duration >= 1 hour`:
-1. Derive new keys: `HKDF-SHA256(old_key, "netudp-rekey" || max_seq)`
-2. Reset sequence counters to 0
+Rekeying is triggered by a **synchronized nonce threshold**, not by unilateral byte/time counters. Both sides agree on the same trigger point, avoiding desynchronized key state.
+
+**Trigger:** When `tx_nonce_counter >= REKEY_NONCE_THRESHOLD` (default: 2^30 = ~1 billion packets). As a safety bound, rekeying also triggers if `bytes_transmitted >= 1GB` or `epoch_duration >= 1 hour`, whichever comes first.
+
+**Protocol:**
+1. The sender includes a `REKEY` flag (bit 3 of prefix byte) on the packet that crosses the threshold.
+2. The receiver, upon seeing the `REKEY` flag, derives the new keys and switches for subsequent packets.
+3. Both sides derive new keys deterministically: `HKDF-SHA256(old_key, "netudp-rekey" || epoch_number)`
+4. The sender continues accepting packets under the old key for up to 256 more packets (grace window) to handle in-flight packets.
+5. After the grace window, old keys are zeroed.
+
+**Key derivation:**
+1. Derive new keys: `HKDF-SHA256(old_key, "netudp-rekey" || epoch_number)`
+2. Reset `tx_nonce_counter` and `rx_nonce_counter` to 0
 3. Reset replay protection window
-4. Both sides derive independently (deterministic from shared state)
+4. Increment `epoch_number`
+
+The `epoch_number` (uint32_t, starts at 0) ensures deterministic derivation even if both sides process the rekey at slightly different times. Both sides derive the same keys because they use the same `old_key` and `epoch_number`.
 
 ### REQ-04.8: AAD (Associated Data)
 
@@ -101,19 +129,25 @@ Total: 22 bytes. Authenticated but not encrypted.
 
 ### REQ-04.9: Replay Protection
 
+Replay protection operates on the **64-bit nonce counter** (from REQ-04.3), not the 16-bit wire sequence. This avoids wraparound issues inherent to 16-bit arithmetic.
+
 ```cpp
 struct ReplayProtection {
-    uint64_t most_recent;
-    uint64_t received[256];  // received[seq % 256] = seq
+    uint64_t most_recent;        // Highest nonce_counter seen
+    uint64_t received[256];      // received[nonce % 256] = nonce
 
-    bool check(uint64_t seq);    // True if already received or too old
-    void advance(uint64_t seq);  // Mark as received, update most_recent
+    bool check(uint64_t nonce);  // True if already received or too old
+    void advance(uint64_t nonce);// Mark as received, update most_recent
     void reset();
 };
 ```
 
-Packets with `seq + 256 <= most_recent` are too old → rejected.
-Packets with `received[seq % 256] == seq` are duplicates → rejected.
+**Rejection rules:**
+- If `nonce + 256 <= most_recent`: too old, reject. (Safe: 64-bit counter does not wrap in practice.)
+- If `received[nonce % 256] == nonce`: duplicate, reject.
+- Otherwise: accept, call `advance(nonce)`.
+
+The 64-bit nonce counter eliminates wraparound concerns. At 2M PPS, a 64-bit counter takes ~292,000 years to wrap.
 
 ## Scenarios
 

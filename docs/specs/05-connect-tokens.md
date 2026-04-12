@@ -37,6 +37,8 @@ Offset  Size   Field
 Private encrypted with `xchacha20poly1305(private_key, nonce, aad)`.
 AAD = version_info + protocol_id + expire_timestamp.
 
+**Size verification:** The private data MUST fit within 1024 bytes before encryption. Worst case: 32 IPv6 addresses (19 bytes each = 608) + fixed fields (8+4+4+32+32+256 = 336) = 944 bytes + 16 bytes Poly1305 tag = 960 bytes encrypted. Maximum padding available: 64 bytes. This SHALL be verified at token generation time; `netudp_generate_connect_token()` SHALL return `NETUDP_ERROR_INVALID_PARAM` if `num_server_addresses > 32` or if the computed private data exceeds 1024 bytes pre-encryption.
+
 ### REQ-05.2: Token Generation
 
 ```cpp
@@ -90,10 +92,27 @@ Client now CONNECTED.
 6. Server address not in token → ignore
 7. Client address already connected → ignore
 8. Client ID already connected → ignore
-9. Token HMAC already used from different IP → ignore
-10. Record token HMAC
+9. Token fingerprint already used from different IP → ignore
+10. Record token fingerprint
 11. Server full → send DENIED (< 1078 bytes, anti-amplification)
 12. Add encryption mapping → send CHALLENGE
+
+**Token Fingerprint (anti-replay):**
+
+The server SHALL compute a fingerprint of each accepted connect token to prevent replay from different IPs:
+
+```cpp
+// Token fingerprint: HMAC-SHA256 truncated to 8 bytes
+// Input: the encrypted_private_data (1024 bytes) from the CONNECTION_REQUEST
+// Key: server's private_key (32 bytes)
+struct TokenFingerprint {
+    uint8_t hash[8];  // First 8 bytes of HMAC-SHA256(private_key, encrypted_private_data)
+};
+```
+
+The server SHALL maintain a hash set of recently seen fingerprints (capacity = `max_connections * 4`, evict oldest on overflow). A fingerprint is recorded after step 10 with the client's source IP. If the same fingerprint arrives from a different IP, the packet is rejected (step 9). Fingerprints are evicted when the corresponding token expires (based on `expire_timestamp`).
+
+**Note on CONNECTION_REQUEST:** The wire packet does NOT include `create_timestamp` (which exists only in the public token at offsets 21-28 for backend validation). The CONNECTION_REQUEST contains only: prefix(1) + version_info(13) + protocol_id(8) + expire_timestamp(8) + nonce(24) + encrypted_private(1024) = 1078 bytes.
 
 ### REQ-05.5: Client State Machine
 
@@ -122,9 +141,22 @@ struct TokenBucket {
     int64_t last_refill_us;
     static constexpr int RATE = 60;   // packets/sec
     static constexpr int BURST = 10;
-    bool try_consume();
+
+    void refill(int64_t now_us) {
+        double elapsed = (now_us - last_refill_us) / 1e6;
+        tokens = min(tokens + RATE * elapsed, (double)BURST);  // Cap at BURST
+        last_refill_us = now_us;
+    }
+
+    bool try_consume() {
+        refill(now());
+        if (tokens >= 1.0) { tokens -= 1.0; return true; }
+        return false;
+    }
 };
 ```
+
+Initial `tokens` SHALL be set to `BURST` (10) on creation. `tokens` SHALL never exceed `BURST` (capped via `min()` in refill).
 
 If bucket empty → silently drop packet. No response (prevents amplification).
 

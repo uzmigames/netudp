@@ -21,7 +21,8 @@ struct Address {
 ```
 
 `Address` SHALL be a POD struct of fixed size, suitable for use as hash map key.
-`Address` SHALL support equality comparison and hashing (SIMD-accelerated).
+`Address` SHALL be **zero-initialized on construction**. When `type == NETUDP_ADDRESS_IPV4`, the 12 bytes beyond `ipv4[4]` in the union MUST be zeroed to prevent spurious hash mismatches or false-inequality when used as hash map keys with SIMD byte comparison.
+`Address` SHALL support equality comparison and hashing (SIMD-accelerated). Comparison SHALL compare only the bytes relevant to `type`: 4 bytes for IPv4, 16 bytes for IPv6, plus `port` and `type`. Hashing SHALL follow the same rule.
 
 ### REQ-02.2: Socket Operations
 
@@ -84,7 +85,15 @@ int netudp_address_equal(const netudp_address_t* a, const netudp_address_t* b);
 
 ### REQ-02.6: DSCP Packet Tagging (Optional)
 The socket MAY support setting DSCP/TOS bits for QoS prioritization.
-Enabled via `netudp_enable_packet_tagging()`. Default: disabled.
+Default: disabled.
+
+```cpp
+// Enable DSCP/TOS packet tagging on a socket.
+// Must be called after socket_create() and before first send.
+// dscp_value: 6-bit DSCP value (0-63), shifted into TOS byte bits 7-2.
+// Returns 0 on success, -1 on error (platform not supported).
+int netudp_enable_packet_tagging(netudp_server_t* server, uint8_t dscp_value);
+```
 
 ## Scenarios
 

@@ -56,7 +56,7 @@ Each ISA implementation SHALL be in a separate .cpp file compiled with its own f
 - `simd_sse42.cpp` — `-msse4.2 -mpopcnt`
 - `simd_avx2.cpp` — `-mavx2 -mbmi2`
 - `simd_neon.cpp` — ARM64 default
-- `simd_avx512.cpp` — `-mavx512f` (future)
+- `simd_avx512.cpp` — `-mavx512f` (future, gated by `NETUDP_ENABLE_AVX512` CMake option, excluded from default build)
 
 ### REQ-01.4: Non-Temporal Stores
 Buffer pool copy operations SHALL use non-temporal (streaming) stores on x86:
@@ -71,7 +71,9 @@ This prevents L1/L2 cache pollution when copying packet data at high throughput.
 ```cpp
 // extern "C"
 netudp_simd_level_t netudp_simd_level(void);
-// Returns the resolved SIMD level (never 0 after init)
+// Returns the resolved SIMD level after init.
+// May return NETUDP_SIMD_GENERIC (0) on CPUs without SIMD extensions — this is valid.
+// Returns -1 if called before netudp_init().
 ```
 
 ## Scenarios

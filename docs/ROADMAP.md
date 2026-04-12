@@ -75,7 +75,7 @@ v1.2.0 ─── SDK: Unreal + Unity + Godot ─────── Target: Week 
 
 ## v0.3.0 — Fragmentation + Full Pipeline
 
-**Goal:** Large messages (up to 512KB) work transparently. Multi-frame packets carry ack + data together.
+**Goal:** Large messages (up to 288KB) work transparently. Multi-frame packets carry ack + data together.
 
 ### Deliverables
 - [ ] Fragment header (message_id, index, count)
@@ -88,10 +88,10 @@ v1.2.0 ─── SDK: Unreal + Unity + Godot ─────── Target: Week 
 - [ ] Variable-length sequence in prefix byte
 - [ ] Full send pipeline: app → channel → compress → fragment → encrypt → batch → socket
 - [ ] Full recv pipeline: socket → decrypt → defragment → decompress → channel → app
-- [ ] Test: 64KB + 256KB + 512KB message delivery under loss
+- [ ] Test: 64KB + 256KB + 288KB message delivery under loss
 
 ### Exit Criteria
-- 512KB messages reassembled correctly under 10% loss
+- 288KB messages reassembled correctly under 10% loss
 - Only lost fragments retransmitted (not whole message)
 - Multi-frame packets verified (ack + data in same UDP packet)
 
