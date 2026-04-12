@@ -27,6 +27,11 @@ add_library(netudp STATIC
     src/api.cpp
     src/core/address.cpp
     src/socket/socket.cpp
+    src/crypto/vendor/monocypher.c
+    src/crypto/aead.cpp
+    src/crypto/xchacha.cpp
+    src/crypto/crc32c.cpp
+    src/crypto/random.cpp
     src/simd/netudp_simd_detect.cpp
     src/simd/simd_generic.cpp
     src/simd/simd_sse42.cpp
@@ -55,7 +60,7 @@ target_compile_definitions(netudp PRIVATE
 
 # Platform-specific link libraries
 if(WIN32)
-    target_link_libraries(netudp PRIVATE ws2_32)
+    target_link_libraries(netudp PRIVATE ws2_32 bcrypt)
 endif()
 
 # Compiler warnings
