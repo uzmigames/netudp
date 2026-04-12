@@ -10,9 +10,13 @@
 #include <netudp/netudp.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
+#include <filesystem>
+#include <string>
 
 /* Forward declarations — one per bench_*.cpp */
 void register_pps_bench(BenchRegistry& reg);
@@ -122,14 +126,34 @@ int BenchRegistry::run(const char* filter, const BenchConfig& cfg,
  * Entry point
  * --------------------------------------------------------------------- */
 
+static std::string make_bench_output_path(const char* filter) {
+    /* benchmarks/YYYY-MM-DD_HH-MM-SS[_<filter>].json */
+    std::time_t t  = std::time(nullptr);
+    std::tm*    tm = std::localtime(&t);
+    char ts[32]    = {};
+    std::strftime(ts, sizeof(ts), "%Y-%m-%d_%H-%M-%S", tm);
+
+    std::filesystem::path dir = "benchmarks";
+    std::filesystem::create_directories(dir);
+
+    std::string name = ts;
+    if (filter != nullptr && filter[0] != '\0') {
+        name += '_';
+        name += filter;
+    }
+    name += ".json";
+
+    return (dir / name).string();
+}
+
 int main(int argc, char** argv) {
     if (netudp_init() != NETUDP_OK) {
         std::fprintf(stderr, "netudp_init() failed\n");
         return 1;
     }
 
-    const char* filter   = nullptr;
-    const char* json_out = nullptr;
+    const char* filter       = nullptr;
+    const char* json_out_arg = nullptr;
     BenchConfig cfg;
 
     for (int i = 1; i < argc; ++i) {
@@ -140,17 +164,25 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(argv[i], "--runs") == 0 && i + 1 < argc) {
             cfg.measure_iters = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--json") == 0 && i + 1 < argc) {
-            json_out = argv[++i];
+            json_out_arg = argv[++i];
         } else if (std::strcmp(argv[i], "--help") == 0) {
             std::printf(
                 "Usage: netudp_bench [OPTIONS]\n"
                 "  --bench  <substr>  run only benchmarks whose name contains substr\n"
                 "  --warmup <N>       warm-up iterations before measuring (default 3)\n"
                 "  --runs   <N>       measurement iterations / samples    (default 10)\n"
-                "  --json   <file>    write results to JSON file\n");
+                "  --json   <file>    override output path (default: benchmarks/<datetime>.json)\n");
             netudp_term();
             return 0;
         }
+    }
+
+    /* Default: auto-generate path in benchmarks/ with datetime */
+    std::string auto_path;
+    const char* json_out = json_out_arg;
+    if (json_out == nullptr) {
+        auto_path = make_bench_output_path(filter);
+        json_out  = auto_path.c_str();
     }
 
     BenchRegistry& reg = BenchRegistry::global();

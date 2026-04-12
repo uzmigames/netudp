@@ -18,6 +18,6 @@ if(WIN32)
 endif()
 
 target_compile_definitions(netudp_bench PRIVATE
-    $<$<CXX_COMPILER_ID:MSVC>:NOMINMAX>
-    $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>
+    $<$<BOOL:${WIN32}>:NOMINMAX>
+    $<$<BOOL:${WIN32}>:_CRT_SECURE_NO_WARNINGS>
 )

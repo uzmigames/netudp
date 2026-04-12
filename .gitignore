@@ -46,6 +46,9 @@ compile_commands.json
 .zig-cache/
 zig-out/
 
+# Benchmark results (tracked dir, not results)
+benchmarks/*.json
+
 CLAUDE.local.md
 .rulebook/backup/
 .rulebook/handoff/_pending.md
