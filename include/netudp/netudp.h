@@ -23,7 +23,8 @@ void netudp_term(void);
 
 /* --- SIMD query --- */
 
-netudp_simd_level_t netudp_simd_level(void);
+/* Returns the detected SIMD level (netudp_simd_level_t) or -1 if called before init. */
+int netudp_simd_level(void);
 
 /* --- Server --- */
 

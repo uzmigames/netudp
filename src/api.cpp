@@ -20,9 +20,9 @@ void netudp_term(void) {
     }
 }
 
-netudp_simd_level_t netudp_simd_level(void) {
+int netudp_simd_level(void) {
     if (!g_initialized.load()) {
-        return static_cast<netudp_simd_level_t>(-1);
+        return -1;
     }
     return NETUDP_SIMD_GENERIC;
 }

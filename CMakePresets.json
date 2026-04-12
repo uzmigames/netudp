@@ -3,8 +3,20 @@
     "cmakeMinimumRequired": { "major": 3, "minor": 20, "patch": 0 },
     "configurePresets": [
         {
+            "name": "_base",
+            "hidden": true,
+            "displayName": "Base (Zig CC)",
+            "toolchainFile": "${sourceDir}/cmake/zig-toolchain.cmake",
+            "generator": "Ninja",
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "zig",
+                "CMAKE_CXX_COMPILER": "zig"
+            }
+        },
+        {
             "name": "debug",
-            "displayName": "Debug",
+            "displayName": "Debug (Zig CC)",
+            "inherits": "_base",
             "binaryDir": "${sourceDir}/build-debug",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug",
@@ -13,7 +25,8 @@
         },
         {
             "name": "release",
-            "displayName": "Release",
+            "displayName": "Release (Zig CC)",
+            "inherits": "_base",
             "binaryDir": "${sourceDir}/build-release",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
@@ -23,7 +36,8 @@
         },
         {
             "name": "relwithdebinfo",
-            "displayName": "Release with Debug Info",
+            "displayName": "Release with Debug Info (Zig CC)",
+            "inherits": "_base",
             "binaryDir": "${sourceDir}/build-reldbg",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "RelWithDebInfo",
@@ -33,18 +47,28 @@
         {
             "name": "cross-linux",
             "displayName": "Cross-compile Linux (Zig CC)",
+            "inherits": "_base",
             "binaryDir": "${sourceDir}/build-linux",
-            "toolchainFile": "${sourceDir}/cmake/zig-toolchain.cmake",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
                 "CMAKE_SYSTEM_NAME": "Linux"
+            }
+        },
+        {
+            "name": "msvc",
+            "displayName": "Debug (MSVC, no Zig)",
+            "binaryDir": "${sourceDir}/build-msvc",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "NETUDP_BUILD_TESTS": "ON"
             }
         }
     ],
     "buildPresets": [
         { "name": "debug", "configurePreset": "debug" },
         { "name": "release", "configurePreset": "release" },
-        { "name": "cross-linux", "configurePreset": "cross-linux" }
+        { "name": "cross-linux", "configurePreset": "cross-linux" },
+        { "name": "msvc", "configurePreset": "msvc" }
     ],
     "testPresets": [
         {
