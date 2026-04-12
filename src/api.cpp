@@ -3,16 +3,26 @@
 #include <netudp/netudp_buffer.h>
 #include "core/platform.h"
 #include "core/address.h"
+#include "core/log.h"
 #include "simd/netudp_simd.h"
 #include "socket/socket.h"
 #include "connection/connect_token.h"
 #include "crypto/xchacha.h"
 #include "crypto/random.h"
 #include "crypto/vendor/monocypher.h"
+#include "profiling/profiler.h"
 
 #include <atomic>
 #include <cstring>
 #include <ctime>
+
+/* ======================================================================
+ * Global log state (defined here, declared in core/log.h)
+ * ====================================================================== */
+
+namespace netudp {
+LogState g_log;
+} // namespace netudp
 
 static std::atomic<bool> g_initialized{false};
 static netudp_simd_level_t g_detected_simd_level = NETUDP_SIMD_GENERIC;
@@ -363,6 +373,82 @@ int netudp_generate_connect_token(
     crypto_wipe(private_data, sizeof(private_data));
 
     return NETUDP_OK;
+}
+
+/* ======================================================================
+ * Batch send/receive API (P7-B)
+ * ====================================================================== */
+
+int netudp_server_send_batch(netudp_server_t* server,
+                             const netudp_send_entry_t* entries, int count) {
+    if (server == nullptr || entries == nullptr || count <= 0) {
+        return NETUDP_ERROR_INVALID_PARAM;
+    }
+    int queued = 0;
+    for (int i = 0; i < count; ++i) {
+        int rc = netudp_server_send(server,
+                                    entries[i].client_index,
+                                    entries[i].channel,
+                                    entries[i].data,
+                                    entries[i].bytes,
+                                    entries[i].flags);
+        if (rc == NETUDP_OK) {
+            ++queued;
+        }
+    }
+    return queued;
+}
+
+int netudp_server_receive_batch(netudp_server_t* server,
+                                netudp_message_t** out, int max_messages) {
+    if (server == nullptr || out == nullptr || max_messages <= 0) {
+        return NETUDP_ERROR_INVALID_PARAM;
+    }
+    int total = 0;
+    /* netudp_server_t is an opaque type here; use the public API to drain
+     * each slot.  max_clients is accessed via netudp_server_max_clients(). */
+    int max_clients = netudp_server_max_clients(server);
+    for (int ci = 0; ci < max_clients && total < max_messages; ++ci) {
+        int n = netudp_server_receive(server, ci,
+                                      out + total, max_messages - total);
+        if (n > 0) {
+            total += n;
+        }
+    }
+    return total;
+}
+
+/* ======================================================================
+ * Logging API
+ * ====================================================================== */
+
+void netudp_set_log_callback(netudp_log_fn fn, void* userdata) {
+    netudp::g_log.userdata.store(userdata, std::memory_order_relaxed);
+    netudp::g_log.callback.store(fn, std::memory_order_release);
+}
+
+void netudp_set_log_level(int min_level) {
+    netudp::g_log.min_level = min_level;
+}
+
+/* ======================================================================
+ * Profiling API
+ * ====================================================================== */
+
+void netudp_profiling_enable(int enabled) {
+    netudp::profiler_enable(enabled);
+}
+
+int netudp_profiling_is_enabled(void) {
+    return netudp::profiler_is_enabled();
+}
+
+int netudp_profiling_get_zones(netudp_profile_zone_t* out, int max_zones) {
+    return netudp::profiler_get_zones(out, max_zones);
+}
+
+void netudp_profiling_reset(void) {
+    netudp::profiler_reset();
 }
 
 } /* extern "C" */

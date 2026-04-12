@@ -6,6 +6,8 @@
  * @brief Per-connection bandwidth control: token bucket, QueuedBits, AIMD congestion.
  */
 
+#include "../core/log.h"
+#include "../profiling/profiler.h"
 #include <algorithm>
 #include <cstdint>
 
@@ -110,6 +112,7 @@ public:
 
     /** Evaluate and adjust send rate. Call once per RTT interval. */
     void evaluate() {
+        NETUDP_ZONE("cong::evaluate");
         if (total_packets_ < 10) {
             return; /* Not enough data */
         }
@@ -118,16 +121,22 @@ public:
 
         if (loss_rate > LOSS_THRESHOLD_HIGH) {
             /* Multiplicative decrease */
+            uint32_t old_rate = send_rate_;
             send_rate_ = static_cast<uint32_t>(static_cast<float>(send_rate_) * DECREASE_FACTOR);
             if (send_rate_ < MIN_SEND_RATE) {
                 send_rate_ = MIN_SEND_RATE;
             }
+            NLOG_DEBUG("[netudp] congestion: rate decreased old=%u new=%u loss=%.1f%%",
+                       old_rate, send_rate_, static_cast<double>(loss_rate) * 100.0);
         } else if (loss_rate < LOSS_THRESHOLD_LOW && rtt_samples_ >= 10) {
             /* Additive increase */
+            uint32_t old_rate = send_rate_;
             send_rate_ = static_cast<uint32_t>(static_cast<float>(send_rate_) * INCREASE_FACTOR);
             if (send_rate_ > max_send_rate_) {
                 send_rate_ = max_send_rate_;
             }
+            NLOG_DEBUG("[netudp] congestion: rate increased old=%u new=%u",
+                       old_rate, send_rate_);
         }
     }
 

@@ -1,5 +1,6 @@
 #include "xchacha.h"
 #include "vendor/monocypher.h"
+#include "../profiling/profiler.h"
 #include <cstring>
 
 namespace netudp {
@@ -18,6 +19,7 @@ int xchacha_encrypt(const uint8_t key[32], const uint8_t nonce[24],
                     const uint8_t* aad, int aad_len,
                     const uint8_t* pt, int pt_len,
                     uint8_t* ct) {
+    NETUDP_ZONE("crypto::encrypt");
     if (pt_len < 0) {
         return -1;
     }
@@ -46,6 +48,7 @@ int xchacha_decrypt(const uint8_t key[32], const uint8_t nonce[24],
                     const uint8_t* aad, int aad_len,
                     const uint8_t* ct, int ct_len,
                     uint8_t* pt) {
+    NETUDP_ZONE("crypto::decrypt");
     if (ct_len < 16) {
         return -1;
     }

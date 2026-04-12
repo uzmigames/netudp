@@ -10,6 +10,8 @@
  */
 
 #include "../core/ring_buffer.h"
+#include "../core/log.h"
+#include "../profiling/profiler.h"
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -94,6 +96,7 @@ public:
 
     /** Find messages that need retransmission (timed out based on RTO). */
     int find_retransmits(double now, double rto, uint16_t* out_seqs, int max_count) {
+        NETUDP_ZONE("rel::find_retransmits");
         int count = 0;
         for (uint16_t seq = oldest_unacked; seq != send_seq && count < max_count; seq++) {
             int idx = seq % RELIABLE_BUFFER_SIZE;
@@ -107,6 +110,7 @@ public:
                 if (msg.retry_count >= MAX_RETRIES) {
                     msg.valid = false; /* Drop after max retries */
                     messages_dropped_++;
+                    NLOG_WARN("[netudp] rel: message dropped after %d retries (seq=%u)", MAX_RETRIES, (unsigned)seq);
                     continue;
                 }
                 out_seqs[count++] = seq;

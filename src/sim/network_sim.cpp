@@ -1,4 +1,6 @@
 #include "network_sim.h"
+#include "../core/log.h"
+#include "../profiling/profiler.h"
 
 #include <algorithm>
 #include <cstring>
@@ -23,8 +25,9 @@ float NetworkSimulator::rand_float() {
 
 void NetworkSimulator::insert(const uint8_t* data, int len,
                               const netudp_address_t* from, double deliver_time) {
+    NETUDP_ZONE("sim::insert");
     if (count >= 512) {
-        /* Queue full — drop */
+        NLOG_WARN("[netudp] sim: queue full, packet dropped");
         return;
     }
 
@@ -59,8 +62,10 @@ void NetworkSimulator::reset() {
 
 int NetworkSimulator::submit(const uint8_t* data, int len,
                              const netudp_address_t* from, double current_time) {
+    NETUDP_ZONE("sim::submit");
     /* --- 1. Loss --- */
     if (rand_float() < config.loss_percent) {
+        NLOG_TRACE("[netudp] sim: packet lost (loss=%.1f%%)", static_cast<double>(config.loss_percent));
         return 0;
     }
 
@@ -100,6 +105,7 @@ void NetworkSimulator::poll(double current_time, void* ctx,
                             void (*callback)(void* ctx, const uint8_t* data,
                                              int len,
                                              const netudp_address_t* from)) {
+    NETUDP_ZONE("sim::poll");
     /* Scan all entries in-place: deliver due packets, compact survivors.
      * Two-pass: first deliver, then compact without a temp buffer.      */
     int write = 0;

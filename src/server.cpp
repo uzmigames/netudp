@@ -12,7 +12,9 @@
 #include "crypto/vendor/monocypher.h"
 #include "core/address.h"
 #include "core/allocator.h"
+#include "core/log.h"
 #include "wire/frame.h"
+#include "profiling/profiler.h"
 #include "reliability/packet_tracker.h"
 #include "sim/network_sim.h"
 
@@ -57,6 +59,10 @@ struct netudp_server {
 
     uint8_t recv_buf[NETUDP_MAX_PACKET_ON_WIRE] = {};
     uint8_t send_buf[NETUDP_MAX_PACKET_ON_WIRE] = {};
+
+    /* Batch recv storage — kSocketBatchMax slots of MAX_PACKET_ON_WIRE each */
+    uint8_t batch_storage[netudp::kSocketBatchMax][NETUDP_MAX_PACKET_ON_WIRE] = {};
+    netudp::SocketPacket batch_pkts[netudp::kSocketBatchMax] = {};
 
     netudp::NetworkSimulator sim;
     bool sim_enabled = false;
@@ -158,15 +164,53 @@ void netudp_server_stop(netudp_server_t* server) {
     }
 }
 
+int netudp_server_max_clients(const netudp_server_t* server) {
+    if (server == nullptr) { return 0; }
+    return server->max_clients;
+}
+
+void netudp_server_get_stats(const netudp_server_t* server,
+                             netudp_server_stats_t* out) {
+    if (server == nullptr || out == nullptr) { return; }
+    std::memset(out, 0, sizeof(*out));
+
+    out->max_clients = server->max_clients;
+    out->ddos_severity = static_cast<uint8_t>(server->ddos.severity());
+
+    int connected = 0;
+    uint64_t bytes_recv = 0;
+    uint64_t bytes_sent = 0;
+    double   pps_in  = 0.0;
+    double   pps_out = 0.0;
+
+    for (int i = 0; i < server->max_clients; ++i) {
+        const netudp::Connection& c = server->connections[i];
+        if (!c.active) { continue; }
+        ++connected;
+        bytes_recv += static_cast<uint64_t>(c.stats.in_bytes_per_sec);
+        bytes_sent += static_cast<uint64_t>(c.stats.out_bytes_per_sec);
+        pps_in     += static_cast<double>(c.stats.in_packets_per_sec);
+        pps_out    += static_cast<double>(c.stats.out_packets_per_sec);
+    }
+
+    out->connected_clients = connected;
+    out->total_bytes_recv  = bytes_recv;
+    out->total_bytes_sent  = bytes_sent;
+    out->recv_pps          = pps_in;
+    out->send_pps          = pps_out;
+}
+
 /* Dispatch a fully-received (or sim-delivered) packet to the correct handler. */
 static void server_dispatch_packet(netudp_server* server,
                                    const netudp_address_t* from,
                                    const uint8_t* data, int len) {
+    NETUDP_ZONE("srv::dispatch");
     uint8_t prefix      = data[0];
     uint8_t packet_type = prefix & 0x0F;
 
     if (packet_type == 0x00 && len == 1078) {
         if (!server->ddos.should_process_new_connection()) {
+            NLOG_WARN("[netudp] dispatch: DDoS threshold exceeded, dropping connection request");
             return;
         }
         netudp::server_handle_connection_request(server, from, data, len);
@@ -183,9 +227,11 @@ static void server_dispatch_packet(netudp_server* server,
         if (slot >= 0) {
             netudp::server_handle_data_packet(server, slot, data, len);
         } else {
+            NLOG_DEBUG("[netudp] dispatch: data packet from unknown address (prefix=0x%02x)", prefix);
             server->ddos.on_bad_packet();
         }
     } else {
+        NLOG_DEBUG("[netudp] dispatch: unknown packet type (prefix=0x%02x, len=%d)", prefix, len);
         server->ddos.on_bad_packet();
     }
 }
@@ -200,6 +246,7 @@ static void sim_deliver_cb(void* ctx, const uint8_t* data, int len,
 }
 
 void netudp_server_update(netudp_server_t* server, double time) {
+    NETUDP_ZONE("srv::update");
     if (server == nullptr || !server->running) {
         return;
     }
@@ -210,26 +257,42 @@ void netudp_server_update(netudp_server_t* server, double time) {
     /* DDoS monitor tick */
     server->ddos.update(dt);
 
-    /* Receive packets */
-    for (int recv_iter = 0; recv_iter < 1024; ++recv_iter) {
-        netudp_address_t from = {};
-        int received = netudp::socket_recv(&server->socket, &from,
-                                            server->recv_buf, sizeof(server->recv_buf));
-        if (received <= 0) {
+    /* Receive packets — batch up to kSocketBatchMax per syscall */
+    for (;;) {
+        /* Set up batch packet pointers into pre-allocated storage */
+        for (int i = 0; i < netudp::kSocketBatchMax; ++i) {
+            server->batch_pkts[i].data = server->batch_storage[i];
+        }
+
+        int n = netudp::socket_recv_batch(&server->socket, server->batch_pkts,
+                                          netudp::kSocketBatchMax,
+                                          NETUDP_MAX_PACKET_ON_WIRE);
+        if (n <= 0) {
             break;
         }
 
-        /* Rate limit */
-        if (!server->rate_limiter.allow(&from, time)) {
-            server->ddos.on_bad_packet();
-            continue;
+        for (int i = 0; i < n; ++i) {
+            netudp_address_t* from    = &server->batch_pkts[i].addr;
+            const void*       pkt_buf = server->batch_pkts[i].data;
+            int               pkt_len = server->batch_pkts[i].len;
+
+            /* Rate limit */
+            if (!server->rate_limiter.allow(from, time)) {
+                server->ddos.on_bad_packet();
+                continue;
+            }
+
+            if (server->sim_enabled) {
+                server->sim.submit(static_cast<const uint8_t*>(pkt_buf), pkt_len, from, time);
+            } else {
+                server_dispatch_packet(server, from,
+                                       static_cast<const uint8_t*>(pkt_buf), pkt_len);
+            }
         }
 
-        if (server->sim_enabled) {
-            /* Hand the packet to the simulator; it will deliver later via poll(). */
-            server->sim.submit(server->recv_buf, received, &from, time);
-        } else {
-            server_dispatch_packet(server, &from, server->recv_buf, received);
+        /* If we got a full batch there may be more — loop again */
+        if (n < netudp::kSocketBatchMax) {
+            break;
         }
     }
 
@@ -260,6 +323,9 @@ void netudp_server_update(netudp_server_t* server, double time) {
 
         /* Timeout */
         if (time - conn.last_recv_time > conn.timeout_seconds) {
+            NLOG_WARN("[netudp] client %llu timed out (slot=%d, idle=%.1fs)",
+                            (unsigned long long)conn.client_id, i,
+                            time - conn.last_recv_time);
             if (server->config.on_disconnect != nullptr) {
                 server->config.on_disconnect(server->config.callback_context, i, -4);
             }
@@ -274,7 +340,7 @@ void netudp_server_update(netudp_server_t* server, double time) {
         conn.stats.max_send_rate_bytes_per_sec = conn.congestion.max_send_rate();
 
         /* Fragment timeout cleanup */
-        conn.fragment_reassembler.cleanup_timeout(time);
+        if (conn.cdata != nullptr) conn.frag().cleanup_timeout(time);
 
         /* Congestion evaluation (every ~RTT) */
         conn.congestion.evaluate();
@@ -305,6 +371,7 @@ void netudp_server_destroy(netudp_server_t* server) {
 
 int netudp_server_send(netudp_server_t* server, int client_index,
                        int channel, const void* data, int bytes, int flags) {
+    NETUDP_ZONE("srv::send");
     if (server == nullptr || !server->running) {
         return NETUDP_ERROR_NOT_INITIALIZED;
     }
@@ -320,14 +387,14 @@ int netudp_server_send(netudp_server_t* server, int client_index,
     }
 
     /* Queue into channel */
-    if (!conn.channels[channel].queue_send(static_cast<const uint8_t*>(data), bytes, flags)) {
+    if (!conn.ch(channel).queue_send(static_cast<const uint8_t*>(data), bytes, flags)) {
         return NETUDP_ERROR_NO_BUFFERS;
     }
-    conn.channels[channel].start_nagle(server->current_time);
+    conn.ch(channel).start_nagle(server->current_time);
 
     /* If NO_DELAY, flush immediately */
     if ((flags & NETUDP_SEND_NO_DELAY) != 0) {
-        conn.channels[channel].flush();
+        conn.ch(channel).flush();
         netudp::server_send_pending(server, client_index);
     }
 
@@ -340,6 +407,7 @@ int netudp_server_send(netudp_server_t* server, int client_index,
 
 int netudp_server_receive(netudp_server_t* server, int client_index,
                           netudp_message_t** messages, int max_messages) {
+    NETUDP_ZONE("srv::receive");
     if (server == nullptr || !server->running || messages == nullptr) {
         return 0;
     }
@@ -352,9 +420,9 @@ int netudp_server_receive(netudp_server_t* server, int client_index,
     }
 
     int count = 0;
-    while (count < max_messages && !conn.delivered_messages.is_empty()) {
+    while (count < max_messages && !conn.delivered().is_empty()) {
         netudp::DeliveredMessage dmsg;
-        if (!conn.delivered_messages.pop_front(&dmsg)) {
+        if (!conn.delivered().pop_front(&dmsg)) {
             break;
         }
         if (!dmsg.valid) {
@@ -445,7 +513,7 @@ void netudp_server_flush(netudp_server_t* server, int client_index) {
         return;
     }
     for (int ch = 0; ch < conn.num_channels; ++ch) {
-        conn.channels[ch].flush();
+        conn.ch(ch).flush();
     }
     netudp::server_send_pending(server, client_index);
 }
@@ -469,7 +537,9 @@ namespace netudp {
 
 void server_handle_connection_request(netudp_server* server,
     const netudp_address_t* from, const uint8_t* packet, int packet_len) {
+    NETUDP_ZONE("srv::conn_request");
     if (packet_len != 1078) {
+        NLOG_WARN("[netudp] conn_request: bad packet length %d (expected 1078)", packet_len);
         return;
     }
 
@@ -506,6 +576,7 @@ void server_handle_connection_request(netudp_server* server,
         encrypted_private, TOKEN_PRIVATE_ENCRYPTED_SIZE, decrypted
     );
     if (dec_len < 0) {
+        NLOG_WARN("[netudp] conn_request: token AEAD decrypt failed (bad key or corrupt token)");
         return;
     }
 
@@ -568,6 +639,9 @@ void server_handle_connection_request(netudp_server* server,
     /* Init ALL subsystems */
     conn.init_subsystems(server->config.channels, server->config.num_channels, server->current_time);
 
+    NLOG_INFO("[netudp] client %llu connected (slot=%d)",
+                    (unsigned long long)priv.client_id, slot);
+
     if (server->config.on_connect != nullptr) {
         server->config.on_connect(server->config.callback_context,
                                    slot, priv.client_id, priv.user_data);
@@ -583,6 +657,7 @@ void server_handle_connection_request(netudp_server* server,
 
 void server_handle_data_packet(netudp_server* server, int slot,
     const uint8_t* packet, int packet_len) {
+    NETUDP_ZONE("srv::data_packet");
     Connection& conn = server->connections[slot];
     if (packet_len < 2) {
         return;
@@ -613,6 +688,8 @@ void server_handle_data_packet(netudp_server* server, int slot,
         if (pt_len < 0) {
             conn.stats.decrypt_failures++;
             server->ddos.on_bad_packet();
+            NLOG_DEBUG("[netudp] data_packet: decrypt failed (slot=%d, failures=%llu)",
+                       slot, (unsigned long long)conn.stats.decrypt_failures);
             return;
         }
     }
@@ -671,7 +748,7 @@ void server_handle_data_packet(netudp_server* server, int slot,
             dmsg.channel = ch;
             dmsg.sequence = 0;
             dmsg.valid = true;
-            conn.delivered_messages.push_back(dmsg);
+            conn.delivered().push_back(dmsg);
             pos += msg_len;
 
         } else if (frame_type == wire::FRAME_RELIABLE_DATA && pos + 5 <= pt_len) {
@@ -686,10 +763,10 @@ void server_handle_data_packet(netudp_server* server, int slot,
                 break;
             }
 
-            uint8_t ch_type = conn.channels[ch].type();
+            uint8_t ch_type = conn.ch(ch).type();
             if (ch_type == NETUDP_CHANNEL_RELIABLE_ORDERED) {
-                if (conn.reliable_state[ch].buffer_received_ordered(msg_seq, plaintext + pos, msg_len)) {
-                    conn.reliable_state[ch].deliver_ordered(
+                if (conn.rs(ch).buffer_received_ordered(msg_seq, plaintext + pos, msg_len)) {
+                    conn.rs(ch).deliver_ordered(
                         [&](const uint8_t* data, int len, uint16_t seq) {
                             DeliveredMessage dmsg;
                             int copy_len = std::min(len, static_cast<int>(NETUDP_MTU));
@@ -698,13 +775,13 @@ void server_handle_data_packet(netudp_server* server, int slot,
                             dmsg.channel = ch;
                             dmsg.sequence = seq;
                             dmsg.valid = true;
-                            conn.delivered_messages.push_back(dmsg);
+                            conn.delivered().push_back(dmsg);
                             conn.stats.messages_received++;
                         });
                 }
             } else if (ch_type == NETUDP_CHANNEL_RELIABLE_UNORDERED) {
-                if (!conn.reliable_state[ch].is_received_unordered(msg_seq)) {
-                    conn.reliable_state[ch].mark_received_unordered(msg_seq);
+                if (!conn.rs(ch).is_received_unordered(msg_seq)) {
+                    conn.rs(ch).mark_received_unordered(msg_seq);
                     DeliveredMessage dmsg;
                     int copy_len = std::min(static_cast<int>(msg_len), static_cast<int>(NETUDP_MTU));
                     std::memcpy(dmsg.data, plaintext + pos, static_cast<size_t>(copy_len));
@@ -712,7 +789,7 @@ void server_handle_data_packet(netudp_server* server, int slot,
                     dmsg.channel = ch;
                     dmsg.sequence = msg_seq;
                     dmsg.valid = true;
-                    conn.delivered_messages.push_back(dmsg);
+                    conn.delivered().push_back(dmsg);
                     conn.stats.messages_received++;
                 }
             }
@@ -731,7 +808,7 @@ void server_handle_data_packet(netudp_server* server, int slot,
             }
 
             int out_size = 0;
-            const uint8_t* complete = conn.fragment_reassembler.on_fragment_received(
+            const uint8_t* complete = conn.frag().on_fragment_received(
                 msg_id, frag_idx, frag_cnt, plaintext + pos, frag_len,
                 NETUDP_MTU - 64, server->current_time, &out_size
             );
@@ -742,15 +819,17 @@ void server_handle_data_packet(netudp_server* server, int slot,
                 dmsg.size = copy_len;
                 dmsg.channel = ch;
                 dmsg.valid = true;
-                conn.delivered_messages.push_back(dmsg);
+                conn.delivered().push_back(dmsg);
                 conn.stats.fragments_received++;
             }
             conn.stats.fragments_received++;
             pos = pt_len; /* Fragment consumes rest */
 
         } else if (frame_type == wire::FRAME_DISCONNECT) {
+            int reason = (pos < pt_len) ? plaintext[pos] : 0;
+            NLOG_INFO("[netudp] client %llu disconnected (slot=%d, reason=%d)",
+                            (unsigned long long)conn.client_id, slot, reason);
             if (server->config.on_disconnect != nullptr) {
-                int reason = (pos < pt_len) ? plaintext[pos] : 0;
                 server->config.on_disconnect(server->config.callback_context, slot, reason);
             }
             conn.reset();
@@ -766,6 +845,7 @@ void server_handle_data_packet(netudp_server* server, int slot,
  * ====================================================================== */
 
 void server_send_pending(netudp_server* server, int slot) {
+    NETUDP_ZONE("srv::send_pending");
     Connection& conn = server->connections[slot];
     double now = server->current_time;
 
@@ -775,10 +855,10 @@ void server_send_pending(netudp_server* server, int slot) {
     }
 
     /* Find next channel with pending data */
-    int ch_idx = ChannelScheduler::next_channel(conn.channels, conn.num_channels, now);
+    int ch_idx = ChannelScheduler::next_channel(conn.cdata->channels, conn.num_channels, now);
     while (ch_idx >= 0) {
         QueuedMessage qmsg;
-        if (!conn.channels[ch_idx].dequeue_send(&qmsg)) {
+        if (!conn.ch(ch_idx).dequeue_send(&qmsg)) {
             break;
         }
 
@@ -791,12 +871,12 @@ void server_send_pending(netudp_server* server, int slot) {
         payload_pos += write_ack_fields(ack, payload + payload_pos);
 
         /* Frame */
-        uint8_t ch_type = conn.channels[ch_idx].type();
+        uint8_t ch_type = conn.ch(ch_idx).type();
         int frame_len = 0;
 
         if (ch_type == NETUDP_CHANNEL_RELIABLE_ORDERED || ch_type == NETUDP_CHANNEL_RELIABLE_UNORDERED) {
             uint16_t pkt_seq = conn.packet_tracker.send_sequence();
-            conn.reliable_state[ch_idx].record_send(qmsg.data, qmsg.size, pkt_seq, now);
+            conn.rs(ch_idx).record_send(qmsg.data, qmsg.size, pkt_seq, now);
             frame_len = wire::write_reliable_frame(
                 payload + payload_pos, NETUDP_MTU - payload_pos,
                 static_cast<uint8_t>(ch_idx), qmsg.sequence, qmsg.data, qmsg.size);
@@ -807,6 +887,7 @@ void server_send_pending(netudp_server* server, int slot) {
         }
 
         if (frame_len < 0) {
+            NLOG_ERROR("[netudp] send_pending: frame encode failed (slot=%d, channel=%d)", slot, ch_idx);
             break;
         }
         payload_pos += frame_len;
@@ -827,6 +908,7 @@ void server_send_pending(netudp_server* server, int slot) {
         int ct_len = crypto::packet_encrypt(&conn.key_epoch, server->protocol_id, prefix,
                                              payload, payload_pos, ct);
         if (ct_len < 0) {
+            NLOG_ERROR("[netudp] send_pending: packet encryption failed (slot=%d)", slot);
             break;
         }
 
@@ -847,7 +929,7 @@ void server_send_pending(netudp_server* server, int slot) {
         conn.budget.consume(total);
 
         /* Next channel */
-        ch_idx = ChannelScheduler::next_channel(conn.channels, conn.num_channels, now);
+        ch_idx = ChannelScheduler::next_channel(conn.cdata->channels, conn.num_channels, now);
 
         if (!conn.budget.can_send()) {
             break;
@@ -860,6 +942,7 @@ void server_send_pending(netudp_server* server, int slot) {
  * ====================================================================== */
 
 void server_send_keepalive(netudp_server* server, int slot) {
+    NETUDP_ZONE("srv::keepalive");
     Connection& conn = server->connections[slot];
     double now = server->current_time;
 

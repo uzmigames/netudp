@@ -11,6 +11,9 @@
 
 #include "netudp_config.h"
 #include "netudp_types.h"
+#include "netudp_buffer.h"
+#include "netudp_token.h"
+#include "netudp_profiling.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -31,6 +34,7 @@ int netudp_simd_level(void);
 netudp_server_t* netudp_server_create(const char* address,
     const netudp_server_config_t* config, double time);
 void netudp_server_start(netudp_server_t* server, int max_clients);
+int  netudp_server_max_clients(const netudp_server_t* server);
 void netudp_server_stop(netudp_server_t* server);
 void netudp_server_update(netudp_server_t* server, double time);
 void netudp_server_destroy(netudp_server_t* server);
@@ -66,6 +70,21 @@ void netudp_client_flush(netudp_client_t* client);
 void netudp_server_set_packet_handler(netudp_server_t* server, uint16_t packet_type,
                                       netudp_packet_handler_fn fn, void* ctx);
 
+/* --- Batch send --- */
+
+/* Descriptor for one entry in a batch send call. */
+typedef struct netudp_send_entry {
+    int         client_index;
+    int         channel;
+    const void* data;
+    int         bytes;
+    int         flags;
+} netudp_send_entry_t;
+
+/* Queue up to count messages in one call.  Returns number queued. */
+int netudp_server_send_batch(netudp_server_t* server,
+                             const netudp_send_entry_t* entries, int count);
+
 /* --- Receive --- */
 
 int  netudp_server_receive(netudp_server_t* server, int client_index,
@@ -73,6 +92,27 @@ int  netudp_server_receive(netudp_server_t* server, int client_index,
 int  netudp_client_receive(netudp_client_t* client,
                            netudp_message_t** messages, int max_messages);
 void netudp_message_release(netudp_message_t* message);
+
+/* Receive from all clients in one call.  Fills out[0..n-1] with message
+ * pointers across all connection slots.  Caller releases each message.
+ * Returns total messages received. */
+int netudp_server_receive_batch(netudp_server_t* server,
+                                netudp_message_t** out, int max_messages);
+
+/* --- Stats --- */
+
+typedef struct netudp_server_stats {
+    int      connected_clients;
+    int      max_clients;
+    double   recv_pps;   /* incoming packets per second */
+    double   send_pps;   /* outgoing packets per second */
+    uint64_t total_bytes_recv;
+    uint64_t total_bytes_sent;
+    uint8_t  ddos_severity;
+} netudp_server_stats_t;
+
+void netudp_server_get_stats(const netudp_server_t* server,
+                             netudp_server_stats_t* out);
 
 /* --- Address --- */
 

@@ -13,6 +13,8 @@
  *   0x06 DISCONNECT
  */
 
+#include "../core/log.h"
+#include "../profiling/profiler.h"
 #include <cstdint>
 #include <cstring>
 
@@ -31,8 +33,10 @@ static constexpr uint8_t FRAME_DISCONNECT      = 0x06;
  */
 inline int write_unreliable_frame(uint8_t* buf, int buf_avail,
                                    uint8_t channel, const uint8_t* data, int data_len) {
+    NETUDP_ZONE("wire::unreliable_frame");
     int needed = 1 + 1 + 2 + data_len;
     if (needed > buf_avail) {
+        NLOG_WARN("[netudp] wire: unreliable frame too large (needed=%d avail=%d)", needed, buf_avail);
         return -1;
     }
     buf[0] = FRAME_UNRELIABLE_DATA;
@@ -50,8 +54,10 @@ inline int write_unreliable_frame(uint8_t* buf, int buf_avail,
 inline int write_reliable_frame(uint8_t* buf, int buf_avail,
                                  uint8_t channel, uint16_t msg_seq,
                                  const uint8_t* data, int data_len) {
+    NETUDP_ZONE("wire::reliable_frame");
     int needed = 1 + 1 + 2 + 2 + data_len;
     if (needed > buf_avail) {
+        NLOG_WARN("[netudp] wire: reliable frame too large (needed=%d avail=%d)", needed, buf_avail);
         return -1;
     }
     buf[0] = FRAME_RELIABLE_DATA;
@@ -71,8 +77,10 @@ inline int write_fragment_frame(uint8_t* buf, int buf_avail,
                                  uint8_t channel, uint16_t msg_id,
                                  uint8_t frag_idx, uint8_t frag_cnt,
                                  const uint8_t* data, int data_len) {
+    NETUDP_ZONE("wire::fragment_frame");
     int needed = 1 + 1 + 2 + 1 + 1 + data_len;
     if (needed > buf_avail) {
+        NLOG_WARN("[netudp] wire: fragment frame too large (needed=%d avail=%d)", needed, buf_avail);
         return -1;
     }
     buf[0] = FRAME_FRAGMENT_DATA;

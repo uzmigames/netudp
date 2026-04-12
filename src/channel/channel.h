@@ -11,6 +11,8 @@
 
 #include <netudp/netudp_types.h>
 #include "../core/ring_buffer.h"
+#include "../core/log.h"
+#include "../profiling/profiler.h"
 
 #include <cstdint>
 #include <cstring>
@@ -33,7 +35,7 @@ struct ChannelStats {
     uint32_t bytes_received = 0;
 };
 
-class Channel {
+class alignas(64) Channel {
 public:
     void init(int index, const netudp_channel_config_t& config) {
         index_ = index;
@@ -48,7 +50,13 @@ public:
 
     /** Queue a message for sending. Returns true if queued successfully. */
     bool queue_send(const uint8_t* data, int size, int flags) {
-        if (size <= 0 || size > NETUDP_MTU || send_queue_.full()) {
+        NETUDP_ZONE("chan::queue_send");
+        if (size <= 0 || size > NETUDP_MTU) {
+            NLOG_WARN("[netudp] chan::queue_send: message size %d out of range (max=%d)", size, NETUDP_MTU);
+            return false;
+        }
+        if (send_queue_.full()) {
+            NLOG_WARN("[netudp] chan::queue_send: queue full (channel=%d)", index_);
             return false;
         }
 

@@ -11,6 +11,8 @@
 
 #include "../core/hash_map.h"
 #include "../core/address.h"
+#include "../core/log.h"
+#include "../profiling/profiler.h"
 #include <netudp/netudp_types.h>
 
 #include <cstdint>
@@ -35,6 +37,7 @@ public:
      * Returns true if allowed, false if rate-limited (drop silently).
      */
     bool allow(const netudp_address_t* addr, double now) {
+        NETUDP_ZONE("ratelimit::allow");
         AddressKey key = make_key(addr);
         RateBucket* bucket = buckets_.find(key);
 
@@ -66,6 +69,7 @@ public:
             return true;
         }
 
+        NLOG_WARN("[netudp] ratelimit: packet dropped (rate=%d pps)", RATE);
         return false; /* Rate limited */
     }
 

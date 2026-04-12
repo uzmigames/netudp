@@ -13,6 +13,8 @@
  */
 
 #include <netudp/netudp_config.h>
+#include "../core/log.h"
+#include "../profiling/profiler.h"
 #include <cstdint>
 #include <cstring>
 #include <new>
@@ -166,6 +168,7 @@ public:
         const uint8_t* fragment_data, int fragment_len,
         int max_fragment_payload, double time, int* out_size
     ) {
+        NETUDP_ZONE("frag::reassemble");
         if (fragment_count == 0 || fragment_index >= fragment_count) {
             return nullptr;
         }
@@ -175,11 +178,15 @@ public:
         if (tracker == nullptr) {
             tracker = allocate_tracker(message_id, fragment_count, time);
             if (tracker == nullptr) {
+                NLOG_WARN("[netudp] frag: all %d reassembly slots in use — dropping fragment (msg_id=%u)",
+                          MAX_CONCURRENT_REASSEMBLIES, (unsigned)message_id);
                 return nullptr; /* No free slots */
             }
         }
 
         if (tracker->total_fragments != fragment_count) {
+            NLOG_DEBUG("[netudp] frag: fragment count mismatch (msg_id=%u, expected=%u, got=%u)",
+                       (unsigned)message_id, (unsigned)tracker->total_fragments, (unsigned)fragment_count);
             return nullptr; /* Mismatch */
         }
 
@@ -191,6 +198,8 @@ public:
         /* Copy fragment data into reassembly buffer */
         int offset = fragment_index * max_fragment_payload;
         if (offset + fragment_len > tracker->buffer_capacity) {
+            NLOG_WARN("[netudp] frag: buffer overflow (msg_id=%u, offset=%d, len=%d, cap=%d)",
+                      (unsigned)message_id, offset, fragment_len, tracker->buffer_capacity);
             return nullptr; /* Would overflow */
         }
 
@@ -199,9 +208,13 @@ public:
         tracker->mark_fragment(fragment_index);
         tracker->last_recv_time = time;
 
+        NLOG_TRACE("[netudp] frag: received %u/%u (msg_id=%u)",
+                   (unsigned)tracker->received_count, (unsigned)tracker->total_fragments, (unsigned)message_id);
+
         if (tracker->is_complete()) {
             *out_size = tracker->total_message_size();
             const uint8_t* result = tracker->buffer;
+            NLOG_DEBUG("[netudp] frag: reassembly complete (msg_id=%u, size=%d)", (unsigned)message_id, *out_size);
             /* Reset tracker after delivering (caller must copy data before next call) */
             tracker->active = false;
             return result;
@@ -212,9 +225,13 @@ public:
 
     /** Cleanup timed-out reassemblies. Returns number cleaned. */
     int cleanup_timeout(double now) {
+        NETUDP_ZONE("frag::cleanup");
         int cleaned = 0;
         for (int i = 0; i < MAX_CONCURRENT_REASSEMBLIES; ++i) {
             if (trackers_[i].active && (now - trackers_[i].first_recv_time) > FRAGMENT_TIMEOUT_SEC) {
+                NLOG_DEBUG("[netudp] frag: timeout cleanup (msg_id=%u, age=%.1fs)",
+                           (unsigned)trackers_[i].message_id,
+                           now - trackers_[i].first_recv_time);
                 trackers_[i].reset();
                 trackers_[i].active = false;
                 cleaned++;

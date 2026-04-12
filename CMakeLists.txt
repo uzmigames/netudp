@@ -19,6 +19,22 @@ option(NETUDP_BUILD_EXAMPLES "Build examples" OFF)
 option(NETUDP_ENABLE_AVX512 "Enable AVX-512 SIMD (experimental)" OFF)
 option(NETUDP_CRC32_ONLY "CRC32C-only mode for LAN/dev (no AEAD encryption)" OFF)
 option(NETUDP_DISABLE_NETC "Disable netc compression (not recommended)" OFF)
+option(NETUDP_ENABLE_TRACY "Integrate Tracy profiler (requires network access)" OFF)
+
+# --- Tracy profiler (optional) ---
+if(NETUDP_ENABLE_TRACY)
+    include(FetchContent)
+    FetchContent_Declare(
+        tracy
+        GIT_REPOSITORY https://github.com/wolfpld/tracy.git
+        GIT_TAG        v0.11.1
+        GIT_SHALLOW    TRUE
+    )
+    set(TRACY_ENABLE ON CACHE BOOL "" FORCE)
+    set(TRACY_ON_DEMAND OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(tracy)
+    set(NETUDP_HAS_TRACY TRUE)
+endif()
 
 # --- netc compression library (default ON) ---
 if(NOT NETUDP_DISABLE_NETC)
@@ -56,6 +72,7 @@ add_library(netudp STATIC
     src/simd/simd_sse42.cpp
     src/simd/simd_avx2.cpp
     src/simd/simd_neon.cpp
+    src/profiling/profiler.cpp
 )
 
 # --- Per-file SIMD compile flags (non-MSVC only, MSVC enables intrinsics by default) ---
@@ -76,6 +93,7 @@ target_compile_definitions(netudp PRIVATE
     $<$<BOOL:${NETUDP_CRC32_ONLY}>:NETUDP_CRC32_ONLY=1>
     $<$<BOOL:${NETUDP_ENABLE_AVX512}>:NETUDP_ENABLE_AVX512=1>
     $<$<BOOL:${NETUDP_HAS_NETC}>:NETUDP_HAS_NETC=1>
+    $<$<BOOL:${NETUDP_HAS_TRACY}>:NETUDP_ENABLE_TRACY=1>
     $<$<BOOL:${WIN32}>:NOMINMAX>
     $<$<BOOL:${WIN32}>:_CRT_SECURE_NO_WARNINGS>
 )
@@ -83,6 +101,11 @@ target_compile_definitions(netudp PRIVATE
 # Platform-specific link libraries
 if(WIN32)
     target_link_libraries(netudp PRIVATE ws2_32 bcrypt)
+endif()
+
+# Tracy link
+if(NETUDP_HAS_TRACY)
+    target_link_libraries(netudp PUBLIC TracyClient)
 endif()
 
 # netc compression (default ON)
@@ -104,7 +127,7 @@ endif()
 
 # Compiler warnings
 if(MSVC)
-    target_compile_options(netudp PRIVATE /W4 /WX)
+    target_compile_options(netudp PRIVATE /W4 /WX /wd4324)  # C4324: struct padded due to alignas
 else()
     target_compile_options(netudp PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
@@ -121,6 +144,12 @@ endif()
 # --- Benchmarks ---
 if(NETUDP_BUILD_BENCH)
     add_subdirectory(bench)
+endif()
+
+# --- Examples ---
+option(NETUDP_BUILD_EXAMPLES "Build example programs" OFF)
+if(NETUDP_BUILD_EXAMPLES)
+    add_subdirectory(examples)
 endif()
 
 # --- Examples ---
