@@ -1,7 +1,6 @@
 #include "xchacha.h"
 #include "vendor/monocypher.h"
 #include "../profiling/profiler.h"
-#include <cstring>
 
 namespace netudp {
 namespace crypto {
@@ -24,28 +23,18 @@ int xchacha_encrypt(const uint8_t key[32], const uint8_t nonce[24],
         return -1;
     }
 
-    /* Derive subkey via HChaCha20 */
-    uint8_t subkey[32];
-    {
-        NETUDP_ZONE("crypto::hchacha20");
-        crypto_chacha20_h(subkey, key, nonce);
-    }
-
-    /* Use last 12 bytes of 24-byte nonce as AEAD nonce, with first 4 bytes zeroed */
-    uint8_t subnonce[12];
-    std::memset(subnonce, 0, 4);
-    std::memcpy(subnonce + 4, nonce + 16, 8);
-
+    /*
+     * Monocypher's crypto_aead_lock takes a 24-byte nonce and internally
+     * performs XChaCha20 key derivation (HChaCha20 + ChaCha20-Poly1305).
+     * Pass the full 24-byte nonce directly — no manual subkey derivation needed.
+     */
     {
         NETUDP_ZONE("crypto::aead_lock");
         uint8_t* mac = ct + pt_len;
-        crypto_aead_lock(ct, mac, subkey, subnonce,
+        crypto_aead_lock(ct, mac, key, nonce,
                          aad, static_cast<size_t>(aad_len),
                          pt, static_cast<size_t>(pt_len));
     }
-
-    /* Wipe subkey */
-    crypto_wipe(subkey, sizeof(subkey));
 
     return pt_len + 16;
 }
@@ -60,27 +49,14 @@ int xchacha_decrypt(const uint8_t key[32], const uint8_t nonce[24],
     }
 
     int pt_len = ct_len - 16;
-
-    uint8_t subkey[32];
-    {
-        NETUDP_ZONE("crypto::hchacha20");
-        crypto_chacha20_h(subkey, key, nonce);
-    }
-
-    uint8_t subnonce[12];
-    std::memset(subnonce, 0, 4);
-    std::memcpy(subnonce + 4, nonce + 16, 8);
-
     int result;
     {
         NETUDP_ZONE("crypto::aead_unlock");
         const uint8_t* mac = ct + pt_len;
-        result = crypto_aead_unlock(pt, mac, subkey, subnonce,
+        result = crypto_aead_unlock(pt, mac, key, nonce,
                                     aad, static_cast<size_t>(aad_len),
                                     ct, static_cast<size_t>(pt_len));
     }
-
-    crypto_wipe(subkey, sizeof(subkey));
 
     if (result != 0) {
         return -1;
