@@ -1,9 +1,11 @@
 #include <netudp/netudp.h>
 #include "core/platform.h"
+#include "simd/netudp_simd.h"
 
 #include <atomic>
 
 static std::atomic<bool> g_initialized{false};
+static netudp_simd_level_t g_detected_simd_level = NETUDP_SIMD_GENERIC;
 
 extern "C" {
 
@@ -11,6 +13,7 @@ int netudp_init(void) {
     if (g_initialized.exchange(true)) {
         return NETUDP_OK;
     }
+    g_detected_simd_level = netudp::simd::detect_and_set();
     return NETUDP_OK;
 }
 
@@ -18,13 +21,15 @@ void netudp_term(void) {
     if (!g_initialized.exchange(false)) {
         return;
     }
+    netudp::simd::g_simd = nullptr;
+    g_detected_simd_level = NETUDP_SIMD_GENERIC;
 }
 
 int netudp_simd_level(void) {
     if (!g_initialized.load()) {
         return -1;
     }
-    return NETUDP_SIMD_GENERIC;
+    return g_detected_simd_level;
 }
 
 /* --- Server lifecycle (Phase 2 implementation) --- */
@@ -89,19 +94,7 @@ int netudp_client_receive(netudp_client_t* /*client*/,
 
 void netudp_message_release(netudp_message_t* /*message*/) {}
 
-/* --- Address (Phase 1 implementation) --- */
-
-int netudp_parse_address(const char* /*str*/, netudp_address_t* /*addr*/) {
-    return NETUDP_ERROR_NOT_INITIALIZED;
-}
-
-char* netudp_address_to_string(const netudp_address_t* /*addr*/, char* buf, int /*buf_len*/) {
-    return buf;
-}
-
-int netudp_address_equal(const netudp_address_t* /*a*/, const netudp_address_t* /*b*/) {
-    return 0;
-}
+/* Address functions implemented in src/core/address.cpp */
 
 /* --- Buffer API (Phase 6 implementation) --- */
 

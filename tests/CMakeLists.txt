@@ -17,6 +17,7 @@ add_executable(netudp_tests
     test_init.cpp
     test_simd.cpp
     test_containers.cpp
+    test_address.cpp
 )
 
 # Tests need access to internal src/ headers for SIMD dispatch testing
