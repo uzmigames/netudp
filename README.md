@@ -197,19 +197,42 @@ netudp_generate_connect_token(
 
 ## Performance
 
+Measured on Windows 10, AMD Ryzen / Intel Core desktop, MSVC Release, single thread.
+
+### Throughput & Latency
+
 | Metric | Target | Windows (measured) | Linux (estimated) |
 |--------|-------:|-------------------:|------------------:|
-| Packets per second (64B, encrypted) | ≥ 2M PPS | ~90K PPS† | ≥ 2M PPS (recvmmsg) |
-| End-to-end loopback latency | p99 ≤ 5 µs | ~18 µs† | ~5 µs |
-| Memory per connection | ≤ 100 KB | 4.4 KB | 4.4 KB |
-| Memory (1024 connections) | ≤ 100 MB | 4.4 MB | 4.4 MB |
-| SIMD improvement (CRC32C, SSE4.2) | ≥ 20% | **22.5×** | **22.5×** |
-| SIMD improvement (replay check, AVX2) | ≥ 20% | **2.3×** | **2.3×** |
+| Packets per second (64B, encrypted) | ≥ 2M PPS | ~90K PPS† | ≥ 2M PPS |
+| End-to-end loopback latency p99 | ≤ 5 µs | ~18 µs† | ~5 µs |
+| Memory per connection | ≤ 100 KB | **4.4 KB** | 4.4 KB |
+| Memory (1024 connections) | ≤ 100 MB | **4.4 MiB** | 4.4 MiB |
 | Zero-GC compliance | 0 alloc after init | ✓ | ✓ |
 
-† Windows UDP socket overhead (~6 µs/sendto) dominates the loopback path. Linux
-  `recvmmsg`/`sendmmsg` batch up to 64 datagrams per syscall, reducing per-packet
-  cost to ≤ 500 ns and hitting the 2 M PPS target.
+† Windows `sendto` costs ~7 µs/call and dominates. Linux `recvmmsg`/`sendmmsg`
+  batch 64 datagrams per syscall, dropping per-packet overhead to ≤ 500 ns.
+
+### Crypto Pipeline (per packet, single core)
+
+| Operation | avg | min |
+|-----------|----:|----:|
+| `packet_encrypt` (nonce + AAD + AEAD) | 948 ns | 700 ns |
+| `packet_decrypt` (nonce + AAD + AEAD + replay) | 1020 ns | 600 ns |
+| `aead::encrypt` (ChaCha20-Poly1305) | 809 ns | 600 ns |
+| `aead::decrypt` (ChaCha20-Poly1305) | 792 ns | 400 ns |
+| `replay::check` | 24 ns | — |
+| `build_nonce` / `build_aad` | ~20 ns | — |
+
+### SIMD Acceleration
+
+| Kernel | Generic | SSE4.2 | AVX2 | Speedup |
+|--------|--------:|-------:|-----:|--------:|
+| CRC32C | 2144 ns | 95 ns | 95 ns | **22.5×** |
+| Ack bitmask scan | 5.4 ns | 7.9 ns | 8.1 ns | — |
+| Replay window check | 32 ns | 29 ns | 14 ns | **2.3×** |
+| NT memcpy (256B) | 9 ns | 643 ns‡ | 16 ns | — |
+
+‡ SSE4.2 NT-memcpy is slower at small sizes due to store-fence overhead; AVX2 path used in practice.
 
 ---
 
