@@ -18,6 +18,19 @@ option(NETUDP_BUILD_BENCH "Build benchmarks" OFF)
 option(NETUDP_BUILD_EXAMPLES "Build examples" OFF)
 option(NETUDP_ENABLE_AVX512 "Enable AVX-512 SIMD (experimental)" OFF)
 option(NETUDP_CRC32_ONLY "CRC32C-only mode for LAN/dev (no AEAD encryption)" OFF)
+option(NETUDP_ENABLE_NETC "Enable netc compression integration" OFF)
+
+# --- Optional: netc compression library ---
+if(NETUDP_ENABLE_NETC)
+    include(FetchContent)
+    FetchContent_Declare(
+        netc
+        GIT_REPOSITORY https://github.com/uzmigames/netc.git
+        GIT_TAG        main
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(netc)
+endif()
 
 # Export compile_commands.json for clang-tidy
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -60,11 +73,18 @@ target_include_directories(netudp
 target_compile_definitions(netudp PRIVATE
     $<$<BOOL:${NETUDP_CRC32_ONLY}>:NETUDP_CRC32_ONLY=1>
     $<$<BOOL:${NETUDP_ENABLE_AVX512}>:NETUDP_ENABLE_AVX512=1>
+    $<$<BOOL:${NETUDP_ENABLE_NETC}>:NETUDP_HAS_NETC=1>
 )
 
 # Platform-specific link libraries
 if(WIN32)
     target_link_libraries(netudp PRIVATE ws2_32 bcrypt)
+endif()
+
+# netc compression (optional)
+if(NETUDP_ENABLE_NETC)
+    target_link_libraries(netudp PRIVATE netc)
+    target_include_directories(netudp PRIVATE ${netc_SOURCE_DIR}/include)
 endif()
 
 # Compiler warnings

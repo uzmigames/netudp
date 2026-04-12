@@ -32,6 +32,7 @@ add_executable(netudp_tests
     test_channels.cpp
     test_fragment.cpp
     test_phase5.cpp
+    test_compressor.cpp
 )
 
 # Tests need access to internal src/ headers for SIMD dispatch testing
