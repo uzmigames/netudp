@@ -29,3 +29,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Platform socket abstraction: Windows (Winsock2) and Unix (BSD sockets)
 - Non-blocking UDP sockets, SO_SNDBUF/RCVBUF 4MB, IPv6 dual-stack (V6ONLY=0)
 - Echo integration test: raw UDP send/recv using Pool + Socket + Address
+- Vendored monocypher: ChaCha20-Poly1305 AEAD, XChaCha20-Poly1305, BLAKE2b
+- AEAD encrypt/decrypt wrappers (24-byte nonce for monocypher compatibility)
+- XChaCha20 encrypt/decrypt for connect token encryption (HChaCha20 subkey derivation)
+- CRC32C wrapper with SIMD dispatch (fixed Castagnoli table for generic fallback)
+- CSPRNG: BCryptGenRandom (Windows), /dev/urandom (Linux), arc4random (macOS)
+- Replay protection: 256-entry window on 64-bit nonce counter (EMPTY_SLOT sentinel)
+- KeyEpoch: per-connection Tx/Rx keys, 64-bit nonce counter, byte tracking
+- Packet-level encrypt/decrypt with AAD (version + protocol_id + prefix = 22 bytes)
+- Connect token generation: serialize private data, XChaCha20 encrypt, 2048-byte output
+- Connect token validation: decrypt, check version/protocol/expiry/server address
+- Token fingerprint: BLAKE2b keyed hash (8 bytes) for anti-replay
+- Per-IP rate limiter: token bucket (60/s, burst 10, 30s expiry, 4096-entry hash map)
+- Client state machine: 10 states (-6 to 3), multi-server fallback on timeout
+- Server lifecycle: create/start/stop/update/destroy, connection slots with generation counter
+- Client lifecycle: create/connect/update/disconnect/destroy
+- Simplified handshake: CONNECTION_REQUEST → KEEPALIVE (direct connection)
+- Server: receive loop with rate limiting, connection timeout detection
+- netudp_server_send/broadcast/broadcast_except (encrypted, simplified)
+- netudp_client_send (encrypted)
