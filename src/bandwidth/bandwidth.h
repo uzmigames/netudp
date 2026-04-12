@@ -26,6 +26,7 @@ struct BandwidthBucket {
     }
 
     void refill(double now) {
+        NETUDP_ZONE("bw::refill");
         double elapsed = now - last_refill_time;
         if (elapsed > 0.0) {
             tokens += static_cast<double>(rate_bytes_per_sec) * elapsed;
@@ -35,6 +36,7 @@ struct BandwidthBucket {
     }
 
     bool try_consume(int bytes) {
+        NETUDP_ZONE("bw::try_consume");
         double needed = static_cast<double>(bytes);
         if (tokens >= needed) {
             tokens -= needed;

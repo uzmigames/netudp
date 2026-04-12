@@ -6,6 +6,11 @@
  * @brief Server-side connection state. One per connected client slot.
  *        Wires ALL subsystems: crypto, packet tracker, RTT, channels,
  *        reliability, fragmentation, bandwidth, stats.
+ *
+ * Design: heavy per-connection buffers (channels, reliable_state,
+ * fragment_reassembler, delivered_messages) are heap-allocated only when a
+ * client actually connects (init_subsystems). Idle slots stay < 3 KB each,
+ * allowing 1024 slots to fit well within 100 MB.
  */
 
 #include <netudp/netudp_types.h>
@@ -20,8 +25,11 @@
 #include "../stats/stats.h"
 #include "connect_token.h"
 
+#include "../core/log.h"
+#include "../profiling/profiler.h"
 #include <cstdint>
 #include <cstring>
+#include <new>
 
 namespace netudp {
 
@@ -36,7 +44,19 @@ struct DeliveredMessage {
     bool     valid = false;
 };
 
-struct Connection {
+/**
+ * Heavy per-connection state — heap-allocated on connect, freed on disconnect.
+ * Keeping this off the slot array means idle slots cost ~3 KB each instead of
+ * ~2.1 MB each.
+ */
+struct ConnectionData {
+    Channel channels[MAX_CHANNELS_PER_CONNECTION];
+    ReliableChannelState reliable_state[MAX_CHANNELS_PER_CONNECTION];
+    FragmentReassembler fragment_reassembler;
+    FixedRingBuffer<DeliveredMessage, 256> delivered_messages;
+};
+
+struct alignas(64) Connection {
     bool     active = false;
     uint32_t generation = 0;
 
@@ -53,15 +73,13 @@ struct Connection {
     /* RTT estimation */
     RttEstimator rtt;
 
-    /* Channels */
-    Channel channels[MAX_CHANNELS_PER_CONNECTION];
-    int     num_channels = 0;
+    /* Channel count (set in init_subsystems) */
+    int num_channels = 0;
 
-    /* Per-channel reliable state */
-    ReliableChannelState reliable_state[MAX_CHANNELS_PER_CONNECTION];
+    /* Heavy data — null for idle slots, heap-allocated for active connections */
+    ConnectionData* cdata = nullptr;
 
-    /* Fragment reassembly */
-    FragmentReassembler fragment_reassembler;
+    /* Fragment send id (lightweight, stays here) */
     uint16_t fragment_send_id = 0;
 
     /* Bandwidth control */
@@ -72,9 +90,6 @@ struct Connection {
     /* Statistics */
     ConnectionStats stats;
 
-    /* Delivered message queue (ring buffer for app pickup) */
-    FixedRingBuffer<DeliveredMessage, 256> delivered_messages;
-
     /* Timing */
     double   connect_time = 0.0;
     double   last_recv_time = 0.0;
@@ -82,20 +97,34 @@ struct Connection {
     double   last_keepalive_time = 0.0;
     uint32_t timeout_seconds = 10;
 
+    /* --- Convenience accessors (only valid when cdata != nullptr) --- */
+    Channel& ch(int i)                   { return cdata->channels[i]; }
+    const Channel& ch(int i) const       { return cdata->channels[i]; }
+    ReliableChannelState& rs(int i)      { return cdata->reliable_state[i]; }
+    FragmentReassembler& frag()          { return cdata->fragment_reassembler; }
+    FixedRingBuffer<DeliveredMessage, 256>& delivered() { return cdata->delivered_messages; }
+
     void init_subsystems(const netudp_channel_config_t* channel_configs, int n_channels, double time) {
+        NETUDP_ZONE("conn::init");
+        /* Allocate heavy data for this active connection */
+        cdata = new (std::nothrow) ConnectionData();
+        if (cdata == nullptr) {
+            return; /* Out of memory — connection will be non-functional */
+        }
+
         num_channels = (n_channels > MAX_CHANNELS_PER_CONNECTION) ? MAX_CHANNELS_PER_CONNECTION : n_channels;
         for (int i = 0; i < num_channels; ++i) {
-            channels[i].init(i, channel_configs[i]);
-            reliable_state[i].reset();
+            cdata->channels[i].init(i, channel_configs[i]);
+            cdata->reliable_state[i].reset();
         }
         packet_tracker.reset();
         rtt.reset();
-        fragment_reassembler.init(NETUDP_MAX_MESSAGE_SIZE);
+        cdata->fragment_reassembler.init(NETUDP_MAX_MESSAGE_SIZE);
         bandwidth.init(time);
         congestion.init();
         stats = ConnectionStats{};
         stats.last_throughput_time_ = time;
-        delivered_messages.clear();
+        cdata->delivered_messages.clear();
         connect_time = time;
         last_recv_time = time;
         last_send_time = time;
@@ -103,6 +132,7 @@ struct Connection {
     }
 
     void reset() {
+        NETUDP_ZONE("conn::reset");
         active = false;
         generation++;
         std::memset(&address, 0, sizeof(address));
@@ -111,13 +141,16 @@ struct Connection {
         key_epoch = crypto::KeyEpoch{};
         packet_tracker.reset();
         rtt.reset();
-        for (int i = 0; i < num_channels; ++i) {
-            reliable_state[i].reset();
+
+        /* Free heavy data if allocated */
+        if (cdata != nullptr) {
+            cdata->fragment_reassembler.destroy();
+            delete cdata;
+            cdata = nullptr;
         }
-        fragment_reassembler.destroy();
+
         congestion.reset();
         stats = ConnectionStats{};
-        delivered_messages.clear();
         connect_time = 0.0;
         last_recv_time = 0.0;
         last_send_time = 0.0;

@@ -26,17 +26,23 @@ int xchacha_encrypt(const uint8_t key[32], const uint8_t nonce[24],
 
     /* Derive subkey via HChaCha20 */
     uint8_t subkey[32];
-    crypto_chacha20_h(subkey, key, nonce);
+    {
+        NETUDP_ZONE("crypto::hchacha20");
+        crypto_chacha20_h(subkey, key, nonce);
+    }
 
     /* Use last 12 bytes of 24-byte nonce as AEAD nonce, with first 4 bytes zeroed */
     uint8_t subnonce[12];
     std::memset(subnonce, 0, 4);
     std::memcpy(subnonce + 4, nonce + 16, 8);
 
-    uint8_t* mac = ct + pt_len;
-    crypto_aead_lock(ct, mac, subkey, subnonce,
-                     aad, static_cast<size_t>(aad_len),
-                     pt, static_cast<size_t>(pt_len));
+    {
+        NETUDP_ZONE("crypto::aead_lock");
+        uint8_t* mac = ct + pt_len;
+        crypto_aead_lock(ct, mac, subkey, subnonce,
+                         aad, static_cast<size_t>(aad_len),
+                         pt, static_cast<size_t>(pt_len));
+    }
 
     /* Wipe subkey */
     crypto_wipe(subkey, sizeof(subkey));
@@ -56,16 +62,23 @@ int xchacha_decrypt(const uint8_t key[32], const uint8_t nonce[24],
     int pt_len = ct_len - 16;
 
     uint8_t subkey[32];
-    crypto_chacha20_h(subkey, key, nonce);
+    {
+        NETUDP_ZONE("crypto::hchacha20");
+        crypto_chacha20_h(subkey, key, nonce);
+    }
 
     uint8_t subnonce[12];
     std::memset(subnonce, 0, 4);
     std::memcpy(subnonce + 4, nonce + 16, 8);
 
-    const uint8_t* mac = ct + pt_len;
-    int result = crypto_aead_unlock(pt, mac, subkey, subnonce,
-                                     aad, static_cast<size_t>(aad_len),
-                                     ct, static_cast<size_t>(pt_len));
+    int result;
+    {
+        NETUDP_ZONE("crypto::aead_unlock");
+        const uint8_t* mac = ct + pt_len;
+        result = crypto_aead_unlock(pt, mac, subkey, subnonce,
+                                    aad, static_cast<size_t>(aad_len),
+                                    ct, static_cast<size_t>(pt_len));
+    }
 
     crypto_wipe(subkey, sizeof(subkey));
 

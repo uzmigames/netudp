@@ -151,10 +151,15 @@ void profiler_reset();
  * The static registration is thread-safe in C++11 (magic statics), and
  * because register_zone() is idempotent once the index is set, concurrent
  * first-entry is also safe.
+ *
+ * NZ_CAT2/NZ_CAT force __LINE__ to expand before token-paste.
+ * This is required by MSVC where ##__LINE__ does not expand __LINE__.
  */
-#define NETUDP_ZONE(name)                                                   \
-    static const int _nz_idx_##__LINE__ = netudp::register_zone(name);     \
-    netudp::ProfileZone _nz_guard_##__LINE__(_nz_idx_##__LINE__)
+#define NZ_CAT2(a, b) a##b
+#define NZ_CAT(a, b)  NZ_CAT2(a, b)
+#define NETUDP_ZONE(name)                                                        \
+    static const int NZ_CAT(_nz_idx_, __LINE__) = netudp::register_zone(name);  \
+    netudp::ProfileZone NZ_CAT(_nz_guard_, __LINE__)(NZ_CAT(_nz_idx_, __LINE__))
 
 /** Emit a named counter value (no-op in built-in mode — use zone stats). */
 #define NETUDP_COUNTER(name, v) (void)(v)

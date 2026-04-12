@@ -146,11 +146,46 @@ static std::string make_bench_output_path(const char* filter) {
     return (dir / name).string();
 }
 
+static void print_profile_zones() {
+    netudp_profile_zone_t zones[64];
+    int count = netudp_profiling_get_zones(zones, 64);
+    if (count <= 0) {
+        std::printf("(no profiling data)\n");
+        return;
+    }
+
+    std::printf("\n%-32s  %8s  %10s  %10s  %10s  %10s\n",
+                "zone", "calls", "total_us", "avg_ns", "min_ns", "max_ns");
+    std::printf("%-32s  %8s  %10s  %10s  %10s  %10s\n",
+                "--------------------------------", "--------",
+                "----------", "----------", "----------", "----------");
+
+    for (int i = 0; i < count; ++i) {
+        const netudp_profile_zone_t& z = zones[i];
+        if (z.call_count == 0) {
+            continue;
+        }
+        double avg_ns   = z.call_count > 0
+                          ? static_cast<double>(z.total_ns) / static_cast<double>(z.call_count)
+                          : 0.0;
+        double total_us = static_cast<double>(z.total_ns) / 1000.0;
+        std::printf("%-32s  %8llu  %10.1f  %10.1f  %10llu  %10llu\n",
+                    z.name,
+                    static_cast<unsigned long long>(z.call_count),
+                    total_us,
+                    avg_ns,
+                    static_cast<unsigned long long>(z.min_ns),
+                    static_cast<unsigned long long>(z.max_ns));
+    }
+    std::printf("\n");
+}
+
 int main(int argc, char** argv) {
     if (netudp_init() != NETUDP_OK) {
         std::fprintf(stderr, "netudp_init() failed\n");
         return 1;
     }
+    netudp_profiling_enable(1);
 
     const char* filter       = nullptr;
     const char* json_out_arg = nullptr;
@@ -193,6 +228,9 @@ int main(int argc, char** argv) {
     register_memory_bench(reg);
 
     int rc = reg.run(filter, cfg, json_out);
+
+    std::printf("=== profiling zones ===\n");
+    print_profile_zones();
 
     netudp_term();
     return rc;

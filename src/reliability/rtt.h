@@ -9,6 +9,8 @@
  * sample_rtt = (now - send_time_of_acked_packet) - ack_delay_us
  */
 
+#include "../core/log.h"
+#include "../profiling/profiler.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -28,6 +30,7 @@ public:
      * @param ack_delay_us  Microseconds the remote held the ack before sending
      */
     void on_sample(double send_time, double now, uint16_t ack_delay_us) {
+        NETUDP_ZONE("rtt::on_sample");
         double sample = (now - send_time) - (static_cast<double>(ack_delay_us) / 1000000.0);
         if (sample < 0.0) {
             sample = 0.001; /* Floor at 1ms */

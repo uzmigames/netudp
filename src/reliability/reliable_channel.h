@@ -47,6 +47,7 @@ public:
 
     /** Record a sent reliable message. */
     bool record_send(const uint8_t* data, int len, uint16_t packet_seq, double time) {
+        NETUDP_ZONE("rel::record_send");
         if (len <= 0 || len > 1200) {
             return false;
         }
@@ -68,6 +69,7 @@ public:
 
     /** Mark a message as acked. */
     void mark_acked(uint16_t msg_seq) {
+        NETUDP_ZONE("rel::mark_acked");
         int idx = msg_seq % RELIABLE_BUFFER_SIZE;
         if (sent_buffer_[idx].valid && sent_buffer_[idx].sequence == msg_seq) {
             sent_buffer_[idx].acked = true;
@@ -123,6 +125,7 @@ public:
 
     /** Buffer a received reliable ordered message. Returns true if new (not duplicate). */
     bool buffer_received_ordered(uint16_t msg_seq, const uint8_t* data, int len) {
+        NETUDP_ZONE("rel::buffer_recv");
         int16_t diff = static_cast<int16_t>(msg_seq - recv_seq);
         if (diff < 0) {
             return false; /* Already delivered */
@@ -151,6 +154,7 @@ public:
      */
     template <typename Fn>
     int deliver_ordered(Fn callback) {
+        NETUDP_ZONE("rel::deliver_ordered");
         int delivered = 0;
         while (true) {
             int idx = recv_seq % RELIABLE_BUFFER_SIZE;

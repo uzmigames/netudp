@@ -10,6 +10,8 @@
  * The sender uses ack_bits to determine which packets were received.
  */
 
+#include "../core/log.h"
+#include "../profiling/profiler.h"
 #include <cstdint>
 #include <cstring>
 
@@ -30,12 +32,13 @@ struct SentPacketRecord {
 
 static constexpr int PACKET_WINDOW_SIZE = 33; /* Matches ack_bits (32 bits) + ack itself */
 
-class PacketTracker {
+class alignas(64) PacketTracker {
 public:
     /* --- Sending --- */
 
     /** Get next send sequence and record the packet. */
     uint16_t send_packet(double time) {
+        NETUDP_ZONE("pkt::send");
         uint16_t seq = send_sequence_++;
         int idx = seq % PACKET_WINDOW_SIZE;
         sent_[idx].sequence = seq;
@@ -57,6 +60,7 @@ public:
 
     /** Called when we receive a packet with this sequence number. */
     void on_packet_received(uint16_t sequence, double time) {
+        NETUDP_ZONE("pkt::on_recv");
         /* Track for ack generation */
         if (!received_any_) {
             recv_ack_ = sequence;
@@ -85,6 +89,7 @@ public:
 
     /** Build AckFields to include in outgoing packet. */
     AckFields build_ack_fields(double now) const {
+        NETUDP_ZONE("pkt::build_ack");
         AckFields fields = {};
         fields.ack = recv_ack_;
         fields.ack_bits = recv_ack_bits_;
@@ -103,6 +108,7 @@ public:
 
     /** Process ack fields from a received packet. Returns number of newly acked packets. */
     int process_acks(const AckFields& fields) {
+        NETUDP_ZONE("pkt::process_acks");
         int newly_acked = 0;
 
         /* The ack field itself */

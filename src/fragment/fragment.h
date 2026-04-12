@@ -242,6 +242,7 @@ public:
 
 private:
     FragmentTracker* find_tracker(uint16_t message_id) {
+        NETUDP_ZONE("frag::find_tracker");
         for (int i = 0; i < MAX_CONCURRENT_REASSEMBLIES; ++i) {
             if (trackers_[i].active && trackers_[i].message_id == message_id) {
                 return &trackers_[i];
@@ -251,6 +252,7 @@ private:
     }
 
     FragmentTracker* allocate_tracker(uint16_t message_id, uint8_t fragment_count, double time) {
+        NETUDP_ZONE("frag::alloc_tracker");
         for (int i = 0; i < MAX_CONCURRENT_REASSEMBLIES; ++i) {
             if (!trackers_[i].active) {
                 trackers_[i].reset();
