@@ -5,7 +5,7 @@
 namespace netudp {
 namespace crypto {
 
-int aead_encrypt(const uint8_t key[32], const uint8_t nonce[12],
+int aead_encrypt(const uint8_t key[32], const uint8_t nonce[24],
                  const uint8_t* aad, int aad_len,
                  const uint8_t* pt, int pt_len,
                  uint8_t* ct) {
@@ -23,7 +23,7 @@ int aead_encrypt(const uint8_t key[32], const uint8_t nonce[12],
     return pt_len + 16;
 }
 
-int aead_decrypt(const uint8_t key[32], const uint8_t nonce[12],
+int aead_decrypt(const uint8_t key[32], const uint8_t nonce[24],
                  const uint8_t* aad, int aad_len,
                  const uint8_t* ct, int ct_len,
                  uint8_t* pt) {

@@ -19,7 +19,7 @@ TEST_F(CryptoTest, AeadRoundTrip) {
     uint8_t key[32] = {};
     netudp::crypto::random_bytes(key, 32);
 
-    uint8_t nonce[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    uint8_t nonce[24] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     const uint8_t aad[] = "netudp_test_aad";
     const uint8_t plaintext[] = "Hello, encrypted world!";
     int pt_len = static_cast<int>(sizeof(plaintext));
@@ -39,7 +39,7 @@ TEST_F(CryptoTest, AeadRoundTrip) {
 TEST_F(CryptoTest, AeadTamperedCiphertext) {
     uint8_t key[32] = {};
     netudp::crypto::random_bytes(key, 32);
-    uint8_t nonce[12] = {};
+    uint8_t nonce[24] = {};
 
     const uint8_t pt[] = "secret data";
     uint8_t ct[128] = {};
@@ -61,7 +61,7 @@ TEST_F(CryptoTest, AeadWrongKey) {
     uint8_t key2[32] = {};
     netudp::crypto::random_bytes(key1, 32);
     netudp::crypto::random_bytes(key2, 32);
-    uint8_t nonce[12] = {};
+    uint8_t nonce[24] = {};
 
     const uint8_t pt[] = "test";
     uint8_t ct[128] = {};
@@ -77,7 +77,7 @@ TEST_F(CryptoTest, AeadWrongKey) {
 TEST_F(CryptoTest, AeadWrongAAD) {
     uint8_t key[32] = {};
     netudp::crypto::random_bytes(key, 32);
-    uint8_t nonce[12] = {};
+    uint8_t nonce[24] = {};
 
     const uint8_t aad1[] = "correct_aad";
     const uint8_t aad2[] = "wrong___aad";

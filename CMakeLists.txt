@@ -32,6 +32,7 @@ add_library(netudp STATIC
     src/crypto/xchacha.cpp
     src/crypto/crc32c.cpp
     src/crypto/random.cpp
+    src/crypto/packet_crypto.cpp
     src/simd/netudp_simd_detect.cpp
     src/simd/simd_generic.cpp
     src/simd/simd_sse42.cpp
