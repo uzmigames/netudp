@@ -192,6 +192,32 @@ public:
         }
         return best;
     }
+
+    /** Fast path: check pending_mask first, only call has_pending if bit is set.
+     *  Also updates the mask (clears bits for channels that drained). */
+    static int next_channel_fast(Channel* channels, int num_channels,
+                                  double now, uint8_t& pending_mask) {
+        if (pending_mask == 0) { return -1; }
+
+        int best = -1;
+        uint8_t best_priority = 0;
+        uint8_t new_mask = 0;
+
+        for (int i = 0; i < num_channels && i < 8; ++i) {
+            if ((pending_mask & (1U << i)) == 0) { continue; }
+            if (channels[i].has_pending(now)) {
+                new_mask |= static_cast<uint8_t>(1U << i);
+                if (best < 0 || channels[i].priority() > best_priority) {
+                    best = i;
+                    best_priority = channels[i].priority();
+                }
+            }
+            /* else: bit was set but queue drained — new_mask doesn't set it */
+        }
+
+        pending_mask = new_mask;
+        return best;
+    }
 };
 
 } // namespace netudp

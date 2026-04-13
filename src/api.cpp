@@ -399,24 +399,8 @@ int netudp_server_send_batch(netudp_server_t* server,
     return queued;
 }
 
-int netudp_server_receive_batch(netudp_server_t* server,
-                                netudp_message_t** out, int max_messages) {
-    if (server == nullptr || out == nullptr || max_messages <= 0) {
-        return NETUDP_ERROR_INVALID_PARAM;
-    }
-    int total = 0;
-    /* netudp_server_t is an opaque type here; use the public API to drain
-     * each slot.  max_clients is accessed via netudp_server_max_clients(). */
-    int max_clients = netudp_server_max_clients(server);
-    for (int ci = 0; ci < max_clients && total < max_messages; ++ci) {
-        int n = netudp_server_receive(server, ci,
-                                      out + total, max_messages - total);
-        if (n > 0) {
-            total += n;
-        }
-    }
-    return total;
-}
+/* netudp_server_receive_batch is implemented in server.cpp
+ * where active_slots[] is accessible for O(active) iteration. */
 
 /* ======================================================================
  * Logging API

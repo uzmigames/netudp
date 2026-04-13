@@ -95,7 +95,9 @@ struct alignas(64) Connection {
     double   last_recv_time = 0.0;
     double   last_send_time = 0.0;
     double   last_keepalive_time = 0.0;
+    double   next_slow_tick = 0.0;  /* Amortized cleanup/stats (phase 34) */
     uint32_t timeout_seconds = 10;
+    uint8_t  pending_mask = 0;      /* 1 bit per channel with pending sends (phase 33) */
 
     /* --- Convenience accessors (only valid when cdata != nullptr) --- */
     Channel& ch(int i)                   { return cdata->channels[i]; }

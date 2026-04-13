@@ -774,17 +774,17 @@ void netudp_server_update(netudp_server_t* server, double time) {
             netudp::server_send_keepalive(server, i);
         }
 
-        /* Stats */
-        conn.stats.update_throughput(time);
-        conn.stats.ping_ms = conn.rtt.ping_ms();
-        conn.stats.send_rate_bytes_per_sec = conn.congestion.send_rate();
-        conn.stats.max_send_rate_bytes_per_sec = conn.congestion.max_send_rate();
-
-        /* Fragment timeout cleanup */
-        if (conn.cdata != nullptr) conn.frag().cleanup_timeout(time);
-
-        /* Congestion evaluation */
-        conn.congestion.evaluate();
+        /* Slow tick: stats, fragment cleanup, congestion — amortized to ~10 Hz
+         * instead of every tick. Saves millions of calls at 5K+ connections. */
+        if (time >= conn.next_slow_tick) {
+            conn.next_slow_tick = time + 0.1; /* ~10 Hz */
+            conn.stats.update_throughput(time);
+            conn.stats.ping_ms = conn.rtt.ping_ms();
+            conn.stats.send_rate_bytes_per_sec = conn.congestion.send_rate();
+            conn.stats.max_send_rate_bytes_per_sec = conn.congestion.max_send_rate();
+            if (conn.cdata != nullptr) { conn.frag().cleanup_timeout(time); }
+            conn.congestion.evaluate();
+        }
 
         ++a;
     }
@@ -843,6 +843,7 @@ int netudp_server_send(netudp_server_t* server, int client_index,
     if (!conn.ch(channel).queue_send(static_cast<const uint8_t*>(data), bytes, flags)) {
         return NETUDP_ERROR_NO_BUFFERS;
     }
+    conn.pending_mask |= static_cast<uint8_t>(1U << channel);
     conn.ch(channel).start_nagle(server->current_time);
 
     /* If NO_DELAY, flush immediately */
@@ -924,6 +925,23 @@ void netudp_message_release(netudp_message_t* message) {
     }
     std::free(message->data);
     std::free(message);
+}
+
+int netudp_server_receive_batch(netudp_server_t* server,
+                                netudp_message_t** out, int max_messages) {
+    NETUDP_ZONE("srv::receive_batch");
+    if (server == nullptr || out == nullptr || max_messages <= 0) {
+        return NETUDP_ERROR_INVALID_PARAM;
+    }
+    int total = 0;
+    /* Iterate active connections only — O(active) not O(max_clients).
+     * With 5000 slots and 100 active, this is 50x fewer iterations. */
+    for (int a = 0; a < server->active_count && total < max_messages; ++a) {
+        int slot = server->active_slots[a];
+        int n = netudp_server_receive(server, slot, out + total, max_messages - total);
+        if (n > 0) { total += n; }
+    }
+    return total;
 }
 
 /* ======================================================================
@@ -1328,13 +1346,13 @@ void server_send_pending(netudp_server* server, int slot) {
     payload_pos += write_ack_fields(ack, payload + payload_pos);
 
     /* Iterate channels, packing frames until MTU is full or queues are empty */
-    int ch_idx = ChannelScheduler::next_channel(conn.cdata->channels, conn.num_channels, now);
+    int ch_idx = ChannelScheduler::next_channel_fast(conn.cdata->channels, conn.num_channels, now, conn.pending_mask);
     while (ch_idx >= 0) {
         NETUDP_ZONE("srv::coalesce");
 
         QueuedMessage qmsg;
         if (!conn.ch(ch_idx).dequeue_send(&qmsg)) {
-            ch_idx = ChannelScheduler::next_channel(conn.cdata->channels, conn.num_channels, now);
+            ch_idx = ChannelScheduler::next_channel_fast(conn.cdata->channels, conn.num_channels, now, conn.pending_mask);
             continue;
         }
 
@@ -1413,7 +1431,7 @@ void server_send_pending(netudp_server* server, int slot) {
         payload_pos += frame_len;
         frames_packed++;
 
-        ch_idx = ChannelScheduler::next_channel(conn.cdata->channels, conn.num_channels, now);
+        ch_idx = ChannelScheduler::next_channel_fast(conn.cdata->channels, conn.num_channels, now, conn.pending_mask);
     }
 
     /* Flush remaining frames */
