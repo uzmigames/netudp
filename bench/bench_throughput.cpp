@@ -22,7 +22,7 @@
 
 static constexpr uint64_t kThrProtoId  = 0xABCD000200000002ULL;
 static constexpr int      kThrMsgSize  = 48;
-static constexpr double   kThrBenchSec = 3.0;
+static constexpr double   kThrBenchSec = 5.0;
 
 static const uint8_t kThrKey[32] = {
     0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8,
@@ -157,8 +157,7 @@ static BenchResult run_throughput(const BenchConfig& cfg,
                 }
             }
 
-            /* Pace to ~16ms per tick for realistic game loop */
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            /* No sleep — run at max throughput */
         }
 
         /* Drain remaining */
@@ -178,7 +177,6 @@ static BenchResult run_throughput(const BenchConfig& cfg,
                     netudp_message_release(msgs_out[j]);
                 }
             }
-            std::this_thread::sleep_for(std::chrono::microseconds(100));
         }
 
         auto t1 = Clock::now();
@@ -202,20 +200,28 @@ static BenchResult run_throughput(const BenchConfig& cfg,
 }
 
 void register_throughput_bench(BenchRegistry& reg) {
-    /* Single-thread: 4 clients, 5 msgs/tick each */
+    /* Small: 4 clients, 5 msgs/tick */
     reg.add("thr_4c_5m_t1", [](const BenchConfig& c) {
         return run_throughput(c, 4, 5, 1, 0);
     });
-    /* Single-thread: 16 clients, 3 msgs/tick */
-    reg.add("thr_16c_3m_t1", [](const BenchConfig& c) {
-        return run_throughput(c, 16, 3, 1, 1);
+    /* Medium: 64 clients, 3 msgs/tick */
+    reg.add("thr_64c_3m_t1", [](const BenchConfig& c) {
+        return run_throughput(c, 64, 3, 1, 1);
     });
-    /* Pipeline: 4 clients, 5 msgs/tick, 2 IO threads */
-    reg.add("thr_4c_5m_t2", [](const BenchConfig& c) {
-        return run_throughput(c, 4, 5, 2, 2);
+    /* Large: 256 clients, 3 msgs/tick */
+    reg.add("thr_256c_3m_t1", [](const BenchConfig& c) {
+        return run_throughput(c, 256, 3, 1, 2);
     });
-    /* Pipeline: 16 clients, 3 msgs/tick, 2 IO threads */
-    reg.add("thr_16c_3m_t2", [](const BenchConfig& c) {
-        return run_throughput(c, 16, 3, 2, 3);
+    /* MMO: 1000 clients, 2 msgs/tick */
+    reg.add("thr_1000c_2m_t1", [](const BenchConfig& c) {
+        return run_throughput(c, 1000, 2, 1, 3);
+    });
+    /* MMO: 5000 clients, 2 msgs/tick, pipeline */
+    reg.add("thr_5000c_2m_t2", [](const BenchConfig& c) {
+        return run_throughput(c, 5000, 2, 2, 4);
+    });
+    /* MMO MAX: 5000 clients, 2 msgs/tick, pipeline + 4 workers */
+    reg.add("thr_5000c_2m_t5", [](const BenchConfig& c) {
+        return run_throughput(c, 5000, 2, 5, 5);
     });
 }

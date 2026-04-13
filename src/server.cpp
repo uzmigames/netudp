@@ -26,6 +26,7 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <vector>
 
 /* ======================================================================
  * IO Worker — one per thread, each owns a socket (SO_REUSEPORT on Linux)
@@ -197,6 +198,14 @@ struct netudp_server {
     int* free_slots = nullptr;     /* Stack of available slot indices */
     int  free_count = 0;
     int* slot_to_active = nullptr; /* Maps slot index → position in active_slots (-1 if inactive) */
+
+    /* Connection worker threads (phase 35) — parallel per-connection processing */
+    int num_workers = 1;           /* 1 = single-threaded (default) */
+    std::vector<std::thread> workers;
+    std::atomic<int> workers_done{0};
+    std::atomic<bool> workers_go{false};
+    double worker_time = 0.0;
+    double worker_dt = 0.0;
 };
 
 /* Forward declarations for internal functions */
@@ -271,6 +280,65 @@ static void pipeline_send_thread(netudp_server* server) {
             netudp::socket_send_batch(&server->socket, batch, count);
         } else {
             std::this_thread::sleep_for(std::chrono::microseconds(50));
+        }
+    }
+}
+
+/** Worker thread: processes a slice of active connections in parallel. */
+static void connection_worker_fn(netudp_server* server, int worker_id) {
+    while (server->running) {
+        /* Spin-wait for go signal */
+        while (!server->workers_go.load(std::memory_order_acquire)) {
+            if (!server->running) { return; }
+            std::this_thread::yield();
+        }
+
+        double time = server->worker_time;
+        double dt = server->worker_dt;
+        int total = server->active_count;
+        int nw = server->num_workers;
+
+        /* This worker processes slice [start, end) of active_slots */
+        int slice = (total + nw - 1) / nw;
+        int start = worker_id * slice;
+        int end = start + slice;
+        if (end > total) { end = total; }
+
+        for (int a = start; a < end; ++a) {
+            int i = server->active_slots[a];
+            netudp::Connection& conn = server->connections[i];
+
+            /* Bandwidth refill */
+            conn.bandwidth.refill(time);
+            conn.budget.refill(dt, conn.congestion.send_rate());
+
+            /* Send pending channel data */
+            netudp::server_send_pending(server, i);
+
+            /* Keepalive */
+            if (time - conn.last_send_time > 1.0) {
+                netudp::server_send_keepalive(server, i);
+            }
+
+            /* Slow tick */
+            if (time >= conn.next_slow_tick) {
+                conn.next_slow_tick = time + 0.1;
+                conn.stats.update_throughput(time);
+                conn.stats.ping_ms = conn.rtt.ping_ms();
+                conn.stats.send_rate_bytes_per_sec = conn.congestion.send_rate();
+                conn.stats.max_send_rate_bytes_per_sec = conn.congestion.max_send_rate();
+                if (conn.cdata != nullptr) { conn.frag().cleanup_timeout(time); }
+                conn.congestion.evaluate();
+            }
+        }
+
+        /* Signal done */
+        server->workers_done.fetch_add(1, std::memory_order_release);
+
+        /* Wait for main thread to reset go signal */
+        while (server->workers_go.load(std::memory_order_acquire)) {
+            if (!server->running) { return; }
+            std::this_thread::yield();
         }
     }
 }
@@ -427,6 +495,19 @@ void netudp_server_start(netudp_server_t* server, int max_clients) {
     netudp::crypto::random_bytes(server->challenge_key, 32);
     server->challenge_sequence = 0;
 
+    /* Start connection worker threads if num_io_threads >= 3
+     * (1 = single, 2 = pipeline recv/send, 3+ = pipeline + N-2 workers) */
+    if (server->num_io_threads >= 3) {
+        server->num_workers = server->num_io_threads - 1; /* Reserve 1 for pipeline */
+        if (server->num_workers > 8) { server->num_workers = 8; }
+        server->workers_go.store(false, std::memory_order_relaxed);
+        server->workers_done.store(0, std::memory_order_relaxed);
+        for (int w = 0; w < server->num_workers; ++w) {
+            server->workers.emplace_back(connection_worker_fn, server, w);
+        }
+        NLOG_INFO("[netudp] worker threads: %d started", server->num_workers);
+    }
+
     /* Start pipeline threads if num_io_threads >= 2 */
     if (server->num_io_threads >= 2) {
         server->pipeline_mode = true;
@@ -446,6 +527,16 @@ void netudp_server_stop(netudp_server_t* server) {
         return;
     }
     server->running = false;
+
+    /* Stop worker threads */
+    if (!server->workers.empty()) {
+        server->workers_go.store(false, std::memory_order_release);
+        for (auto& w : server->workers) {
+            if (w.joinable()) { w.join(); }
+        }
+        server->workers.clear();
+        server->num_workers = 1;
+    }
 
     /* Stop pipeline threads */
     if (server->pipeline_mode) {
@@ -740,14 +831,10 @@ void netudp_server_update(netudp_server_t* server, double time) {
         server->sim.poll(time, &dc, sim_deliver_cb);
     }
 
-    /* Per-connection: send pending, keepalive, timeout, stats.
-     * Iterates active_slots only — O(active) not O(max_clients). */
+    /* Timeout check — must run on main thread (modifies active_slots) */
     for (int a = 0; a < server->active_count; ) {
         int i = server->active_slots[a];
         netudp::Connection& conn = server->connections[i];
-
-        /* Timeout check — deactivate removes from active list via swap-remove,
-         * so do NOT increment a (the swapped-in slot needs processing). */
         if (time - conn.last_recv_time > conn.timeout_seconds) {
             NLOG_WARN("[netudp] client %llu timed out (slot=%d, idle=%.1fs)",
                             (unsigned long long)conn.client_id, i,
@@ -758,35 +845,49 @@ void netudp_server_update(netudp_server_t* server, double time) {
             server->address_to_slot.remove(conn.address);
             server_deactivate_slot(server, i);
             conn.reset();
-            /* Don't increment a — swapped element now at position a */
             continue;
         }
-
-        /* Bandwidth refill */
-        conn.bandwidth.refill(time);
-        conn.budget.refill(dt, conn.congestion.send_rate());
-
-        /* Send pending channel data */
-        netudp::server_send_pending(server, i);
-
-        /* Keepalive */
-        if (time - conn.last_send_time > 1.0) {
-            netudp::server_send_keepalive(server, i);
-        }
-
-        /* Slow tick: stats, fragment cleanup, congestion — amortized to ~10 Hz
-         * instead of every tick. Saves millions of calls at 5K+ connections. */
-        if (time >= conn.next_slow_tick) {
-            conn.next_slow_tick = time + 0.1; /* ~10 Hz */
-            conn.stats.update_throughput(time);
-            conn.stats.ping_ms = conn.rtt.ping_ms();
-            conn.stats.send_rate_bytes_per_sec = conn.congestion.send_rate();
-            conn.stats.max_send_rate_bytes_per_sec = conn.congestion.max_send_rate();
-            if (conn.cdata != nullptr) { conn.frag().cleanup_timeout(time); }
-            conn.congestion.evaluate();
-        }
-
         ++a;
+    }
+
+    /* Per-connection processing: bandwidth, send_pending, keepalive, slow tick.
+     * When num_workers > 1, dispatch to worker threads for parallel processing. */
+    if (server->num_workers > 1 && server->active_count > 0) {
+        /* Parallel: signal workers, wait for completion */
+        server->worker_time = time;
+        server->worker_dt = dt;
+        server->workers_done.store(0, std::memory_order_release);
+        server->workers_go.store(true, std::memory_order_release);
+
+        /* Wait for all workers to finish */
+        while (server->workers_done.load(std::memory_order_acquire) < server->num_workers) {
+            std::this_thread::yield();
+        }
+        server->workers_go.store(false, std::memory_order_release);
+    } else {
+        /* Single-threaded: process all connections inline */
+        for (int a = 0; a < server->active_count; ++a) {
+            int i = server->active_slots[a];
+            netudp::Connection& conn = server->connections[i];
+
+            conn.bandwidth.refill(time);
+            conn.budget.refill(dt, conn.congestion.send_rate());
+            netudp::server_send_pending(server, i);
+
+            if (time - conn.last_send_time > 1.0) {
+                netudp::server_send_keepalive(server, i);
+            }
+
+            if (time >= conn.next_slow_tick) {
+                conn.next_slow_tick = time + 0.1;
+                conn.stats.update_throughput(time);
+                conn.stats.ping_ms = conn.rtt.ping_ms();
+                conn.stats.send_rate_bytes_per_sec = conn.congestion.send_rate();
+                conn.stats.max_send_rate_bytes_per_sec = conn.congestion.max_send_rate();
+                if (conn.cdata != nullptr) { conn.frag().cleanup_timeout(time); }
+                conn.congestion.evaluate();
+            }
+        }
     }
 
     /* Rate limiter cleanup */
