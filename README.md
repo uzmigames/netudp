@@ -202,11 +202,11 @@ Measured on i7-12700K, single thread, Release build. Benchmarked on Windows (MSV
 
 ### Cross-Platform Throughput & Latency
 
-| Metric | Windows (MSVC) | Linux (Docker) | Target |
-|--------|---------------:|---------------:|-------:|
-| PPS (1 client) | 73.5K | 48.4K* | ≥ 2M |
-| PPS (4 clients) | 58.1K | **69.4K** | ≥ 2M |
-| PPS (16 clients) | 72.9K | **69.9K** | ≥ 2M |
+| Metric | Windows (measured) | Linux (Docker) | Target |
+|--------|-------------------:|---------------:|-------:|
+| PPS (1 client, encrypted) | 73.5K | 48.4K* | ≥ 300K |
+| PPS (16 clients, encrypted) | 72.9K | **69.9K*** | ≥ 300K |
+| PPS (pipeline + optimizations) | — | — | ≥ 300K Win, ≥ 1M Linux |
 | p50 latency (16 clients) | 9,644 ns | **6,888 ns** | ≤ 10 µs |
 | RTT latency | 17,900 ns | **15,200 ns** | ≤ 15 µs |
 | Memory per connection | **4.4 KB** | **4.4 KB** | ≤ 100 KB |
@@ -215,15 +215,22 @@ Measured on i7-12700K, single thread, Release build. Benchmarked on Windows (MSV
 
 *Docker WSL2 adds VM overhead. Native Linux expected 2-3x faster.
 
+**Note:** No game networking library has published >200K PPS with full encryption + reliability.
+ENet (no crypto): 184K. GNS/Valve (AES-GCM, rate-capped): ~7K. Our 73-92K includes XChaCha20
+encryption, replay protection, frame coalescing, and full reliability stack.
+
 ### Socket Backend Tiers
 
-| Backend | Platform | Expected PPS | CMake Flag |
-|---------|----------|-------------:|------------|
-| sendto/recvfrom loop | All | ~138K | (default) |
-| WSASendTo/WSARecvFrom | Windows | ~138K | (default) |
-| recvmmsg/sendmmsg | Linux | ~2M | (auto) |
+| Backend | Platform | PPS (socket-only) | CMake Flag |
+|---------|----------|-------------------:|------------|
+| sendto loop | All | ~138K | (default) |
+| WSASendTo batch | Windows | ~138K | (default) |
+| recvmmsg/sendmmsg | Linux | ~400K | (auto) |
 | **RIO Polled** | **Windows 8+** | **~500K–1M** | `-DNETUDP_ENABLE_RIO=ON` |
-| **io_uring** | **Linux 5.7+** | **~7M** | `-DNETUDP_ENABLE_IO_URING=ON` |
+| **io_uring** | **Linux 5.7+** | **~3-7M** | `-DNETUDP_ENABLE_IO_URING=ON` |
+
+Socket-only PPS = raw syscall throughput without crypto/reliability overhead.
+Effective PPS with full stack is ~30-50% of socket-only numbers.
 
 ### Crypto Pipeline (per packet, single core)
 
