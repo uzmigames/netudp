@@ -24,6 +24,7 @@
 #include <cstring>
 #include <functional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -229,6 +230,33 @@ public:
         return *this;
     }
 
+    /** Quantized float: stores as int16 with given precision (e.g. 0.1f = 1 decimal). */
+    BufferWriter& qf32(float v, float precision = 0.1f) {
+        auto q = static_cast<int16_t>(v / precision);
+        netudp_buffer_write_u16(buf_, static_cast<uint16_t>(q));
+        return *this;
+    }
+
+    /** Quantized 3D vector: 6 bytes instead of 12 (int16 x3 at given precision). */
+    BufferWriter& vec3(float x, float y, float z, float precision = 0.1f) {
+        qf32(x, precision); qf32(y, precision); qf32(z, precision);
+        return *this;
+    }
+
+    /** Rotation: 1 byte (256 values for 2*pi range). */
+    BufferWriter& rot(float radians) {
+        auto b = static_cast<uint8_t>((radians + 3.14159265f) * (255.0f / 6.28318530f));
+        netudp_buffer_write_u8(buf_, b);
+        return *this;
+    }
+
+    /** Write a typed packet struct (calls T::serialize). */
+    template <typename T>
+    BufferWriter& packet(const T& pkt) {
+        pkt.serialize(*this);
+        return *this;
+    }
+
     netudp_buffer_t* raw() { return buf_; }
 
 private:
@@ -251,8 +279,238 @@ public:
     double   f64()    { return netudp_buffer_read_f64(buf_); }
     int32_t  varint() { return netudp_buffer_read_varint(buf_); }
 
+    /** Dequantize float from int16 at given precision. */
+    float qf32(float precision = 0.1f) {
+        auto q = static_cast<int16_t>(netudp_buffer_read_u16(buf_));
+        return static_cast<float>(q) * precision;
+    }
+
+    /** Read quantized 3D vector (6 bytes). */
+    void vec3(float& x, float& y, float& z, float precision = 0.1f) {
+        x = qf32(precision); y = qf32(precision); z = qf32(precision);
+    }
+
+    /** Read rotation from 1 byte. */
+    float rot() {
+        auto b = netudp_buffer_read_u8(buf_);
+        return static_cast<float>(b) * (6.28318530f / 255.0f) - 3.14159265f;
+    }
+
+    /** Deserialize a typed packet struct (calls T::deserialize). */
+    template <typename T>
+    T packet() {
+        return T::deserialize(*this);
+    }
+
 private:
     netudp_buffer_t* buf_;
+};
+
+/* ======================================================================
+ * Packet system — typed structs with serialize/deserialize
+ *
+ * Pattern from ToS-Server-5: each packet is a struct that writes
+ * directly to the buffer by reference. Multiple packets can be
+ * serialized into the same buffer (natural coalescing).
+ *
+ * Usage:
+ *
+ *   struct UpdateEntity {
+ *       static constexpr uint8_t packet_type = 0x02;
+ *
+ *       uint32_t entity_id;
+ *       float pos_x, pos_y, pos_z;
+ *       uint16_t anim_state;
+ *
+ *       void serialize(netudp::BufferWriter& buf) const {
+ *           buf.u8(packet_type).u32(entity_id)
+ *              .vec3(pos_x, pos_y, pos_z)
+ *              .u16(anim_state);
+ *       }
+ *
+ *       static UpdateEntity deserialize(netudp::BufferReader& buf) {
+ *           return {
+ *               .entity_id  = buf.u32(),
+ *               .pos_x = buf.qf32(), .pos_y = buf.qf32(), .pos_z = buf.qf32(),
+ *               .anim_state = buf.u16()
+ *           };
+ *       }
+ *   };
+ *
+ *   // Batch multiple packets into one buffer (coalesced into one UDP packet):
+ *   auto buf = server.acquire_buffer();
+ *   buf.packet(UpdateEntity{42, x, y, z, anim});
+ *   buf.packet(HealthUpdate{42, hp, max_hp});
+ *   buf.packet(ChatMessage{42, "hello"});
+ *   server.send_buffer(client, 0, buf);
+ *
+ * ====================================================================== */
+
+/**
+ * PacketDispatcher — type-safe receive dispatch table.
+ *
+ * Register handlers for each packet_type byte, then dispatch incoming
+ * messages. The first byte of each message is the packet_type.
+ *
+ * Usage:
+ *   netudp::PacketDispatcher dispatch;
+ *   dispatch.on<UpdateEntity>([](int client, UpdateEntity pkt) {
+ *       world.set_position(pkt.entity_id, pkt.pos_x, pkt.pos_y, pkt.pos_z);
+ *   });
+ *   dispatch.on<ChatMessage>([](int client, ChatMessage msg) {
+ *       chat.broadcast(msg.text);
+ *   });
+ *
+ *   // In game loop:
+ *   server.receive_all(64, [&](netudp::Message msg) {
+ *       dispatch.handle(msg);
+ *   });
+ */
+/**
+ * RawReader — lightweight reader over raw byte pointer (no netudp_buffer_t needed).
+ *
+ * Used by PacketDispatcher for zero-copy deserialization of received messages.
+ * Same API as BufferReader but reads from a raw uint8_t* + offset.
+ */
+class RawReader {
+public:
+    RawReader(const uint8_t* data, int size) : data_(data), size_(size), pos_(0) {}
+
+    uint8_t u8() {
+        if (pos_ + 1 > size_) { return 0; }
+        return data_[pos_++];
+    }
+    uint16_t u16() {
+        if (pos_ + 2 > size_) { return 0; }
+        uint16_t v = 0;
+        std::memcpy(&v, data_ + pos_, 2);
+        pos_ += 2;
+        return v;
+    }
+    uint32_t u32() {
+        if (pos_ + 4 > size_) { return 0; }
+        uint32_t v = 0;
+        std::memcpy(&v, data_ + pos_, 4);
+        pos_ += 4;
+        return v;
+    }
+    uint64_t u64() {
+        if (pos_ + 8 > size_) { return 0; }
+        uint64_t v = 0;
+        std::memcpy(&v, data_ + pos_, 8);
+        pos_ += 8;
+        return v;
+    }
+    float f32() {
+        if (pos_ + 4 > size_) { return 0.0f; }
+        float v = 0.0f;
+        std::memcpy(&v, data_ + pos_, 4);
+        pos_ += 4;
+        return v;
+    }
+    double f64() {
+        if (pos_ + 8 > size_) { return 0.0; }
+        double v = 0.0;
+        std::memcpy(&v, data_ + pos_, 8);
+        pos_ += 8;
+        return v;
+    }
+    float qf32(float precision = 0.1f) {
+        auto q = static_cast<int16_t>(u16());
+        return static_cast<float>(q) * precision;
+    }
+    void vec3(float& x, float& y, float& z, float precision = 0.1f) {
+        x = qf32(precision); y = qf32(precision); z = qf32(precision);
+    }
+    float rot() {
+        auto b = u8();
+        return static_cast<float>(b) * (6.28318530f / 255.0f) - 3.14159265f;
+    }
+
+    int remaining() const { return size_ - pos_; }
+    int position() const { return pos_; }
+
+private:
+    const uint8_t* data_;
+    int size_;
+    int pos_;
+};
+
+/**
+ * PacketDispatcher — type-safe receive dispatch table.
+ *
+ * Register handlers per packet_type byte. First byte of each message
+ * is used for dispatch. The handler receives (client_index, deserialized_packet).
+ *
+ * Typed packets must have:
+ *   static constexpr uint8_t packet_type = ...;
+ *   static T deserialize(netudp::RawReader& reader);
+ *
+ * Usage:
+ *   netudp::PacketDispatcher dispatch;
+ *
+ *   dispatch.on<UpdateEntity>([](int client, UpdateEntity pkt) {
+ *       world.set_position(pkt.entity_id, pkt.pos_x, pkt.pos_y, pkt.pos_z);
+ *   });
+ *
+ *   dispatch.on<ChatMessage>([](int client, ChatMessage msg) {
+ *       chat.broadcast(msg.sender, msg.text);
+ *   });
+ *
+ *   // Raw handler for untyped packets:
+ *   dispatch.on_raw(0xFF, [](int client, const uint8_t* data, int size) {
+ *       // raw bytes after the type byte
+ *   });
+ *
+ *   // In game loop:
+ *   server.receive_all(64, [&](netudp::Message msg) {
+ *       dispatch.handle(msg);
+ *   });
+ */
+class PacketDispatcher {
+public:
+    using RawHandler = std::function<void(int client, const uint8_t* data, int size)>;
+
+    /**
+     * Register a typed packet handler.
+     * T must have: static constexpr uint8_t packet_type;
+     *              static T deserialize(RawReader& reader);
+     * Fn signature: void(int client, T packet)
+     */
+    template <typename T, typename Fn>
+    void on(Fn&& fn) {
+        handlers_[T::packet_type] = [f = std::forward<Fn>(fn)](
+            int client, const uint8_t* data, int size) {
+            RawReader reader(data, size);
+            T pkt = T::deserialize(reader);
+            f(client, pkt);
+        };
+    }
+
+    /** Register a raw handler for a specific packet type byte. */
+    void on_raw(uint8_t type, RawHandler fn) {
+        handlers_[type] = std::move(fn);
+    }
+
+    /** Dispatch a received message. Returns true if a handler was found. */
+    bool handle(const Message& msg) {
+        if (msg.size() < 1) { return false; }
+        uint8_t type = msg.bytes()[0];
+        auto it = handlers_.find(type);
+        if (it != handlers_.end()) {
+            it->second(msg.client(), msg.bytes() + 1, msg.size() - 1);
+            return true;
+        }
+        return false;
+    }
+
+    /** Check if a handler is registered for a type. */
+    bool has_handler(uint8_t type) const {
+        return handlers_.find(type) != handlers_.end();
+    }
+
+private:
+    std::unordered_map<uint8_t, RawHandler> handlers_;
 };
 
 /* ======================================================================
