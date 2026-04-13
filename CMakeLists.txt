@@ -22,7 +22,13 @@ option(NETUDP_DISABLE_NETC "Disable netc compression (not recommended)" OFF)
 option(NETUDP_ENABLE_TRACY "Integrate Tracy profiler (requires network access)" OFF)
 option(NETUDP_DISABLE_PROFILING "Compile out built-in profiler (zero overhead)" OFF)
 option(NETUDP_ENABLE_IO_URING "Enable io_uring socket backend (Linux 5.7+)" OFF)
-option(NETUDP_ENABLE_RIO "Enable Registered I/O socket backend (Windows 8+)" OFF)
+# RIO requires MSVC headers (mswsock.h with RIO types). Zig CC lacks them.
+# Default ON only when using MSVC, OFF with Zig CC.
+if(MSVC)
+    option(NETUDP_ENABLE_RIO "Enable Registered I/O socket backend (Windows 8+)" ON)
+else()
+    option(NETUDP_ENABLE_RIO "Enable Registered I/O socket backend (Windows 8+)" OFF)
+endif()
 option(NETUDP_BUILD_SHARED "Build shared library (DLL/SO) in addition to static" OFF)
 
 # --- io_uring detection (Linux only) ---

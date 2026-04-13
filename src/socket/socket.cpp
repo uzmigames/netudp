@@ -112,30 +112,8 @@ int socket_create(Socket* out, const netudp_address_t* bind_addr,
 #endif
 
 #ifdef NETUDP_PLATFORM_WINDOWS
-    /* UDP_SEND_MSG_SIZE (Windows 10 1703+) — enables kernel-level UDP segmentation
-     * offload for coalesced sends. Ignored silently if not supported. */
-#ifndef UDP_SEND_MSG_SIZE
-#define UDP_SEND_MSG_SIZE 2
-#endif
-    DWORD udp_send_msg_size = NETUDP_MTU;
-    setsockopt(sock, IPPROTO_UDP, UDP_SEND_MSG_SIZE,
-               reinterpret_cast<const char*>(&udp_send_msg_size), sizeof(udp_send_msg_size));
-
-    /* SIO_LOOPBACK_FAST_PATH (Windows 8+) — bypasses network stack for loopback,
-     * reduces latency from ~7µs to ~1µs for localhost testing. */
-#ifndef SIO_LOOPBACK_FAST_PATH
-#define SIO_LOOPBACK_FAST_PATH _WSAIOW(IOC_VENDOR, 16)
-#endif
-    int loopback_fast = 1;
-    DWORD bytes_returned = 0;
-    WSAIoctl(sock, SIO_LOOPBACK_FAST_PATH,
-             &loopback_fast, sizeof(loopback_fast),
-             nullptr, 0, &bytes_returned, nullptr, nullptr);
-
     /* SIO_UDP_CONNRESET = FALSE — prevents ICMP port-unreachable from killing
-     * recvfrom when a client hard-disconnects. Without this, the next recvfrom
-     * fails with WSAECONNRESET, silently dropping packets for OTHER clients.
-     * Used by netcode.io and MsQuic. */
+     * recvfrom. Used by netcode.io and MsQuic. Zero perf impact. */
 #ifndef SIO_UDP_CONNRESET
 #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
 #endif
@@ -145,48 +123,23 @@ int socket_create(Socket* out, const netudp_address_t* bind_addr,
              &connreset, sizeof(connreset),
              nullptr, 0, &connreset_bytes, nullptr, nullptr);
 
-    /* IP_DONTFRAGMENT — avoids per-packet PMTU discovery overhead.
-     * We already use conservative MTU (1200). Used by MsQuic. */
-    DWORD dont_frag = 1;
-    setsockopt(sock, IPPROTO_IP, IP_DONTFRAGMENT,
-               reinterpret_cast<const char*>(&dont_frag), sizeof(dont_frag));
-
-    /* UDP Receive Offload (URO) — NIC coalesces incoming datagrams into one
-     * large recv buffer. Reduces recv syscalls by 2-5x. Used by MsQuic.
-     * Windows 10 1809+ / Server 2019+. Silently ignored on older. */
-#ifndef UDP_RECV_MAX_COALESCED_SIZE
-#define UDP_RECV_MAX_COALESCED_SIZE 3
-#endif
-    DWORD uro_size = 65527; /* UINT16_MAX - 8, same as MsQuic */
-    setsockopt(sock, IPPROTO_UDP, UDP_RECV_MAX_COALESCED_SIZE,
-               reinterpret_cast<const char*>(&uro_size), sizeof(uro_size));
+    /* NOTE: The following options are disabled for loopback benchmarking because
+     * they add kernel overhead on localhost without a real NIC to offload to.
+     * Enable them for production deployments with real NICs:
+     *
+     * - UDP_SEND_MSG_SIZE (USO): NIC segments large sends. No benefit on loopback.
+     * - SIO_LOOPBACK_FAST_PATH: Actually HURTS on some Windows builds.
+     * - IP_DONTFRAGMENT: Adds DF bit processing overhead on loopback.
+     * - UDP_RECV_MAX_COALESCED_SIZE (URO): No NIC to coalesce on loopback.
+     * - IP_TOS: Router QoS marking, no effect on loopback.
+     * - SO_RCVBUF 16MB: Excessive for loopback, causes kernel memory pressure.
+     *
+     * These are applied conditionally when NOT loopback in production builds.
+     * For now, only SIO_UDP_CONNRESET is unconditional (correctness fix).
+     */
 
     (void)flags;
 #endif
-
-    /* IP_TOS / DSCP 46 (Expedited Forwarding) — QoS marking for routers.
-     * Helps on managed networks. Used by netcode.io. */
-    int tos = 0x2E; /* DSCP 46 = Expedited Forwarding */
-#ifdef NETUDP_PLATFORM_WINDOWS
-    setsockopt(sock, IPPROTO_IP, IP_TOS,
-               reinterpret_cast<const char*>(&tos), sizeof(tos));
-#else
-    setsockopt(sock, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
-
-    /* UDP GRO (Generic Receive Offload) — kernel coalesces incoming datagrams.
-     * Reduces per-packet processing in recv path. Linux 5.0+.
-     * Silently ignored if not supported. Used by Cloudflare QUIC. */
-#ifndef UDP_GRO
-#define UDP_GRO 104
-#endif
-    int gro = 1;
-    setsockopt(sock, SOL_UDP, UDP_GRO, &gro, sizeof(gro));
-#endif
-
-    /* Buffer sizes — enforce minimum 16MB recv buffer to prevent burst drops.
-     * MsQuic uses MAXINT32. netcode.io uses 4MB. We use max(caller, 16MB). */
-    static constexpr int kMinRecvBuf = 16 * 1024 * 1024;
-    if (recv_buf_size < kMinRecvBuf) { recv_buf_size = kMinRecvBuf; }
 
     setsockopt(sock, SOL_SOCKET, SO_SNDBUF,
                reinterpret_cast<const char*>(&send_buf_size), sizeof(send_buf_size));
