@@ -81,6 +81,8 @@ add_library(netudp STATIC
     src/socket/socket_uring.cpp
     src/crypto/vendor/monocypher.c
     src/crypto/aead.cpp
+    src/crypto/aead_dispatch.cpp
+    src/crypto/aead_aesgcm.cpp
     src/crypto/xchacha.cpp
     src/crypto/crc32c.cpp
     src/crypto/random.cpp

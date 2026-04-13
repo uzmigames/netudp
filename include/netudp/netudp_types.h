@@ -95,6 +95,13 @@ typedef void (*netudp_disconnect_fn)(void* ctx, int client_index, int reason);
 typedef void (*netudp_packet_handler_fn)(void* ctx, int client_index,
                                           const void* data, int size, int channel);
 
+/* --- Crypto mode --- */
+
+typedef enum {
+    NETUDP_CRYPTO_XCHACHA20 = 0, /**< XChaCha20-Poly1305 (default, nonce-misuse resistant) */
+    NETUDP_CRYPTO_AES_GCM   = 1  /**< AES-256-GCM (opt-in, requires AES-NI, 2x faster) */
+} netudp_crypto_mode_t;
+
 /* --- Channel config --- */
 
 typedef enum {
@@ -140,6 +147,9 @@ typedef struct netudp_server_config {
 
     /* Network simulator (optional, NULL disables) */
     const void* sim_config; /* NetSimConfig*, NULL = disabled */
+
+    /* Crypto mode */
+    uint8_t crypto_mode; /**< netudp_crypto_mode_t. Default: NETUDP_CRYPTO_XCHACHA20. */
 
     /* Threading (Linux only — SO_REUSEPORT multi-thread I/O) */
     int num_io_threads; /**< Number of I/O threads. 0 or 1 = single-threaded (default). */

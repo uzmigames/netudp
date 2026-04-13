@@ -1,5 +1,6 @@
 #include "packet_crypto.h"
 #include "aead.h"
+#include "aead_dispatch.h"
 #include "vendor/monocypher.h"
 #include "../core/log.h"
 #include "../profiling/profiler.h"
@@ -136,7 +137,7 @@ int packet_decrypt_grace(KeyEpoch* epoch, uint64_t protocol_id, uint8_t prefix_b
     uint8_t aad[22];
     int aad_len = build_aad(protocol_id, prefix_byte, aad);
 
-    int pt_len = aead_decrypt(epoch->old_rx_key, nonce, aad, aad_len,
+    int pt_len = g_aead_decrypt(epoch->old_rx_key, nonce, aad, aad_len,
                               ct, ct_len, pt);
     if (pt_len >= 0) {
         --epoch->grace_packets_remaining;
@@ -165,7 +166,7 @@ int packet_encrypt(KeyEpoch* epoch, uint64_t protocol_id, uint8_t prefix_byte,
     uint8_t aad[22];
     int aad_len = build_aad(protocol_id, prefix_byte, aad);
 
-    int ct_len = aead_encrypt(epoch->tx_key, nonce, aad, aad_len, pt, pt_len, ct);
+    int ct_len = g_aead_encrypt(epoch->tx_key, nonce, aad, aad_len, pt, pt_len, ct);
     if (ct_len < 0) {
         return -1;
     }
@@ -195,7 +196,7 @@ int packet_decrypt(KeyEpoch* epoch, uint64_t protocol_id, uint8_t prefix_byte,
     uint8_t aad[22];
     int aad_len = build_aad(protocol_id, prefix_byte, aad);
 
-    int pt_len = aead_decrypt(epoch->rx_key, nonce, aad, aad_len, ct, ct_len, pt);
+    int pt_len = g_aead_decrypt(epoch->rx_key, nonce, aad, aad_len, ct, ct_len, pt);
     if (pt_len < 0) {
         return -1; /* Auth failure */
     }
