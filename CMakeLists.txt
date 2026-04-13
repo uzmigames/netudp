@@ -22,6 +22,7 @@ option(NETUDP_DISABLE_NETC "Disable netc compression (not recommended)" OFF)
 option(NETUDP_ENABLE_TRACY "Integrate Tracy profiler (requires network access)" OFF)
 option(NETUDP_DISABLE_PROFILING "Compile out built-in profiler (zero overhead)" OFF)
 option(NETUDP_ENABLE_IO_URING "Enable io_uring socket backend (Linux 5.7+)" OFF)
+option(NETUDP_ENABLE_RIO "Enable Registered I/O socket backend (Windows 8+)" OFF)
 
 # --- io_uring detection (Linux only) ---
 if(NETUDP_ENABLE_IO_URING AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -79,6 +80,7 @@ add_library(netudp STATIC
     src/connection/connect_token.cpp
     src/socket/socket.cpp
     src/socket/socket_uring.cpp
+    src/socket/socket_rio.cpp
     src/crypto/vendor/monocypher.c
     src/crypto/aead.cpp
     src/crypto/aead_dispatch.cpp
@@ -116,6 +118,7 @@ target_compile_definitions(netudp PRIVATE
     $<$<BOOL:${NETUDP_HAS_TRACY}>:NETUDP_ENABLE_TRACY=1>
     $<$<BOOL:${NETUDP_DISABLE_PROFILING}>:NETUDP_DISABLE_PROFILING=1>
     $<$<BOOL:${NETUDP_HAS_IO_URING}>:NETUDP_HAS_IO_URING=1>
+    $<$<BOOL:${NETUDP_ENABLE_RIO}>:NETUDP_HAS_RIO=1>
     $<$<BOOL:${WIN32}>:NOMINMAX>
     $<$<BOOL:${WIN32}>:_CRT_SECURE_NO_WARNINGS>
 )
