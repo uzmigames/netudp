@@ -337,6 +337,38 @@ int socket_recv_batch(Socket* sock, SocketPacket* pkts, int max_pkts, int buf_le
     int received = 0;
     const int limit = (max_pkts > kSocketBatchMax) ? kSocketBatchMax : max_pkts;
 
+#ifdef NETUDP_PLATFORM_WINDOWS
+    /* Optimized Windows path: WSARecvFrom avoids sendto compat shim overhead */
+    for (int i = 0; i < limit; ++i) {
+        WSABUF wsa_buf;
+        wsa_buf.buf = static_cast<char*>(pkts[i].data);
+        wsa_buf.len = static_cast<ULONG>(buf_len);
+        DWORD bytes_recv = 0;
+        DWORD wsa_flags = 0;
+
+        struct sockaddr_storage ss;
+        std::memset(&ss, 0, sizeof(ss));
+        int ss_len = sizeof(ss);
+
+        int result = WSARecvFrom(sock->handle, &wsa_buf, 1, &bytes_recv, &wsa_flags,
+                                 reinterpret_cast<struct sockaddr*>(&ss), &ss_len,
+                                 nullptr, nullptr);
+        if (result == SOCKET_ERROR) {
+            int err = WSAGetLastError();
+            if (err == WSAEWOULDBLOCK) {
+                break; /* No more data */
+            }
+            return (received > 0) ? received : -1;
+        }
+        if (bytes_recv == 0) {
+            break;
+        }
+        pkts[i].len = static_cast<int>(bytes_recv);
+        sockaddr_to_address(&ss, &pkts[i].addr);
+        ++received;
+    }
+#else
+    /* macOS fallback — loop recvfrom */
     for (int i = 0; i < limit; ++i) {
         int n = socket_recv(sock, &pkts[i].addr, pkts[i].data, buf_len);
         if (n <= 0) {
@@ -345,6 +377,7 @@ int socket_recv_batch(Socket* sock, SocketPacket* pkts, int max_pkts, int buf_le
         pkts[i].len = n;
         ++received;
     }
+#endif
 
     return received;
 }
@@ -356,8 +389,43 @@ int socket_send_batch(Socket* sock, const SocketPacket* pkts, int count) {
         return -1;
     }
 
+    const int batch = (count > kSocketBatchMax) ? kSocketBatchMax : count;
+
+#ifdef NETUDP_PLATFORM_WINDOWS
+    /*
+     * Optimized Windows path: pre-convert all addresses, then send via
+     * WSASendTo in a tight loop. Avoids repeated address_to_sockaddr
+     * overhead and uses WSABUF for explicit buffer control.
+     */
+    struct sockaddr_storage addrs[kSocketBatchMax];
+    int addr_lens[kSocketBatchMax];
+
+    /* Pre-convert all addresses in one pass */
+    for (int i = 0; i < batch; ++i) {
+        address_to_sockaddr(&pkts[i].addr, &addrs[i], &addr_lens[i]);
+    }
+
+    /* Send in tight loop using WSASendTo */
     int sent = 0;
-    for (int i = 0; i < count; ++i) {
+    for (int i = 0; i < batch; ++i) {
+        WSABUF wsa_buf;
+        wsa_buf.buf = static_cast<char*>(pkts[i].data);
+        wsa_buf.len = static_cast<ULONG>(pkts[i].len);
+        DWORD bytes_sent = 0;
+
+        int result = WSASendTo(sock->handle, &wsa_buf, 1, &bytes_sent, 0,
+                               reinterpret_cast<const struct sockaddr*>(&addrs[i]),
+                               addr_lens[i], nullptr, nullptr);
+        if (result == SOCKET_ERROR) {
+            break;
+        }
+        ++sent;
+    }
+    return sent;
+#else
+    /* macOS fallback — loop sendto */
+    int sent = 0;
+    for (int i = 0; i < batch; ++i) {
         int n = socket_send(sock, &pkts[i].addr,
                             pkts[i].data, pkts[i].len);
         if (n < 0) {
@@ -365,8 +433,8 @@ int socket_send_batch(Socket* sock, const SocketPacket* pkts, int count) {
         }
         ++sent;
     }
-
     return sent;
+#endif
 }
 
 #endif /* __linux__ */
