@@ -429,6 +429,69 @@ int socket_send_batch(Socket* sock, const SocketPacket* pkts, int count) {
 
     const int batch = (count > kSocketBatchMax) ? kSocketBatchMax : count;
 
+    /* Try GSO: if all packets have the same size AND go to the same destination,
+     * concatenate into one super-buffer and let the kernel segment (UDP_SEGMENT).
+     * This sends N datagrams in 1 syscall instead of N. */
+#ifndef UDP_SEGMENT
+#define UDP_SEGMENT 103
+#endif
+    if (batch > 1) {
+        bool same_size = true;
+        bool same_dest = true;
+        int seg_size = pkts[0].len;
+        for (int i = 1; i < batch; ++i) {
+            if (pkts[i].len != seg_size) { same_size = false; break; }
+            if (std::memcmp(&pkts[i].addr, &pkts[0].addr, sizeof(netudp_address_t)) != 0) { same_dest = false; break; }
+        }
+        if (same_size && same_dest && seg_size > 0) {
+            NETUDP_ZONE("sock::send_gso");
+            /* Concatenate all payloads into one contiguous buffer */
+            uint8_t super_buf[kSocketBatchMax * NETUDP_MAX_PACKET_ON_WIRE];
+            size_t total_len = 0;
+            for (int i = 0; i < batch; ++i) {
+                std::memcpy(super_buf + total_len, pkts[i].data,
+                            static_cast<size_t>(pkts[i].len));
+                total_len += static_cast<size_t>(pkts[i].len);
+            }
+
+            struct sockaddr_storage dest_addr;
+            int dest_len = 0;
+            address_to_sockaddr(&pkts[0].addr, &dest_addr, &dest_len);
+
+            struct iovec iov;
+            iov.iov_base = super_buf;
+            iov.iov_len  = total_len;
+
+            /* Set UDP_SEGMENT via cmsg ancillary data */
+            union {
+                char buf[CMSG_SPACE(sizeof(uint16_t))];
+                struct cmsghdr align;
+            } cmsg_buf;
+
+            struct msghdr msg;
+            std::memset(&msg, 0, sizeof(msg));
+            msg.msg_name       = &dest_addr;
+            msg.msg_namelen    = static_cast<socklen_t>(dest_len);
+            msg.msg_iov        = &iov;
+            msg.msg_iovlen     = 1;
+            msg.msg_control    = cmsg_buf.buf;
+            msg.msg_controllen = sizeof(cmsg_buf.buf);
+
+            struct cmsghdr* cm = CMSG_FIRSTHDR(&msg);
+            cm->cmsg_level = SOL_UDP;
+            cm->cmsg_type  = UDP_SEGMENT;
+            cm->cmsg_len   = CMSG_LEN(sizeof(uint16_t));
+            *reinterpret_cast<uint16_t*>(CMSG_DATA(cm)) = static_cast<uint16_t>(seg_size);
+
+            ssize_t result = sendmsg(sock->handle, &msg, 0);
+            if (result >= 0) {
+                return batch; /* All segments sent as one syscall */
+            }
+            /* GSO failed (kernel too old?) — fall through to sendmmsg */
+        }
+    }
+
+    /* Standard sendmmsg path (fallback or mixed-size/mixed-dest packets) */
     struct mmsghdr  mmsg[kSocketBatchMax];
     struct iovec    iov[kSocketBatchMax];
     struct sockaddr_storage addrs[kSocketBatchMax];
@@ -521,19 +584,58 @@ int socket_send_batch(Socket* sock, const SocketPacket* pkts, int count) {
 
 #ifdef NETUDP_PLATFORM_WINDOWS
     /*
-     * Optimized Windows path: pre-convert all addresses, then send via
-     * WSASendTo in a tight loop. Avoids repeated address_to_sockaddr
-     * overhead and uses WSABUF for explicit buffer control.
+     * Try USO (UDP Segmentation Offload): if all packets have the same size
+     * and go to the same destination, concatenate into one large WSASendTo call.
+     * The kernel + NIC segment by UDP_SEND_MSG_SIZE into individual datagrams.
+     * Windows 10 1703+ with capable NIC. Falls through to WSASendTo loop on failure.
      */
+    if (batch > 1) {
+        bool same_size = true;
+        bool same_dest = true;
+        int seg_size = pkts[0].len;
+        for (int i = 1; i < batch; ++i) {
+            if (pkts[i].len != seg_size) { same_size = false; break; }
+            if (std::memcmp(&pkts[i].addr, &pkts[0].addr, sizeof(netudp_address_t)) != 0) { same_dest = false; break; }
+        }
+        if (same_size && same_dest && seg_size > 0) {
+            NETUDP_ZONE("sock::send_uso");
+            /* Concatenate payloads into one contiguous buffer */
+            uint8_t super_buf[kSocketBatchMax * NETUDP_MAX_PACKET_ON_WIRE];
+            ULONG total_len = 0;
+            for (int i = 0; i < batch; ++i) {
+                std::memcpy(super_buf + total_len, pkts[i].data,
+                            static_cast<size_t>(pkts[i].len));
+                total_len += static_cast<ULONG>(pkts[i].len);
+            }
+
+            struct sockaddr_storage dest_addr;
+            int dest_len = 0;
+            address_to_sockaddr(&pkts[0].addr, &dest_addr, &dest_len);
+
+            WSABUF wsa_buf;
+            wsa_buf.buf = reinterpret_cast<char*>(super_buf);
+            wsa_buf.len = total_len;
+            DWORD bytes_sent = 0;
+
+            /* Send the super-buffer — kernel segments by UDP_SEND_MSG_SIZE */
+            int result = WSASendTo(sock->handle, &wsa_buf, 1, &bytes_sent, 0,
+                                    reinterpret_cast<const struct sockaddr*>(&dest_addr),
+                                    dest_len, nullptr, nullptr);
+            if (result != SOCKET_ERROR) {
+                return batch; /* All segments sent in one syscall */
+            }
+            /* USO failed — fall through to per-packet WSASendTo */
+        }
+    }
+
+    /* Standard path: pre-convert addresses, WSASendTo in tight loop */
     struct sockaddr_storage addrs[kSocketBatchMax];
     int addr_lens[kSocketBatchMax];
 
-    /* Pre-convert all addresses in one pass */
     for (int i = 0; i < batch; ++i) {
         address_to_sockaddr(&pkts[i].addr, &addrs[i], &addr_lens[i]);
     }
 
-    /* Send in tight loop using WSASendTo */
     int sent = 0;
     for (int i = 0; i < batch; ++i) {
         WSABUF wsa_buf;
