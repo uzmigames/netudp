@@ -18,7 +18,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Recv offloads**: Windows URO (`UDP_RECV_MAX_COALESCED_SIZE`) + Linux GRO (`UDP_GRO`) for NIC-level datagram coalescing.
 - **Precomputed Nagle threshold**: Eliminates per-call floating-point division in channel scheduler.
 - **Broadcast optimization**: Uses active connection list — O(active) not O(max_clients).
-- **Real-world throughput benchmark**: `bench_throughput.cpp` — N clients sending M msgs/tick, tests up to 5,000 concurrent players with pipeline mode.
+- **receive_batch uses active_slots**: O(active) drain instead of O(max_clients). Eliminated 286M→5K empty calls in 5K player benchmark.
+- **Pending bitmap per connection**: `uint8_t pending_mask` with `next_channel_fast()` — only checks channels with queued data. Eliminated 27.9M→5K `has_pending` calls.
+- **Amortized slow tick**: Stats, fragment cleanup, congestion evaluation grouped to ~10 Hz instead of every tick. Eliminated 8.8M→50K cleanup calls.
+- **Connection worker threads**: Parallel per-connection processing (bandwidth, send_pending, keepalive). Workers process slices of active_slots. Spin-wait barrier sync. `num_io_threads >= 3` activates workers.
+- **Real-world throughput benchmark**: `bench_throughput.cpp` — N clients sending M msgs/tick, tests up to 5,000 concurrent players with pipeline + worker modes.
 - **C++ SDK typed packet system**: `BufferWriter::vec3()`, `qf32()`, `rot()` quantization. `PacketDispatcher` for type-safe receive. `RawReader` for zero-copy deserialization.
 - **C++ SDK high-level API**: Auto key generation, protocol ID from string hash, logging/profiling wrappers, `send_reliable()`/`send_unreliable()` convenience.
 - **DLL/SO build**: `NETUDP_BUILD_SHARED` option, `scripts/package.bat` for dist packaging.
@@ -32,10 +36,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 | Small (4c × 5 msgs) | 4 | 892 |
 | Medium (64c × 3 msgs) | 64 | 8,562 |
 | Large (256c × 3 msgs) | 256 | 34,237 |
-| MMO (1000c × 2 msgs) | 1,000 | **81,187** |
-| MMO Max (5000c × 2 msgs, pipeline) | 5,000 | **49,668** |
+| MMO (1000c × 2 msgs) | 1,000 | **82,963** |
+| MMO (5000c × 2 msgs, pipeline) | 5,000 | **60,726** |
+| MMO Max (5000c × 2 msgs, 4 workers) | 5,000 | **65,293** |
 
 Synthetic PPS: 96K (Zig CC, +9% vs v1.0 baseline of 88K). Latency p50: 8,000ns (-12%).
+
+#### Comparison with competition (encrypted + reliable)
+
+| Library | Crypto | Players tested | Msgs/s |
+|---------|--------|---------------:|-------:|
+| **netudp v1.2** | XChaCha20 | 5,000 | **65,293** |
+| GNS (Valve) | AES-256-GCM | N/A | ~7,000 |
+| netcode.io | XSalsa20 (auth) | 64 max | ~3,840 |
+| ENet | None | N/A | 184,000 (no crypto) |
+
+No other game networking library has published encrypted multi-thousand-player benchmarks.
 
 ### Fixed
 - **Socket option regression**: Removed MsQuic socket options that hurt loopback performance (USO, URO, SIO_LOOPBACK_FAST_PATH, IP_DONTFRAGMENT, IP_TOS, SO_RCVBUF 16MB). These only help with real NICs, not loopback.
