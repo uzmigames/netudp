@@ -27,6 +27,9 @@ tmp/
 # C/C++ build artifacts
 build/
 build-*/
+build_bench/
+build_linux/
+dist/
 out/
 *.o
 *.obj

@@ -98,8 +98,9 @@ typedef void (*netudp_packet_handler_fn)(void* ctx, int client_index,
 /* --- Crypto mode --- */
 
 typedef enum {
-    NETUDP_CRYPTO_XCHACHA20 = 0, /**< XChaCha20-Poly1305 (default, nonce-misuse resistant) */
-    NETUDP_CRYPTO_AES_GCM   = 1  /**< AES-256-GCM (opt-in, requires AES-NI, 2x faster) */
+    NETUDP_CRYPTO_XCHACHA20 = 0, /**< XChaCha20-Poly1305 (nonce-misuse resistant, software) */
+    NETUDP_CRYPTO_AES_GCM   = 1, /**< AES-256-GCM (requires AES-NI, ~7x faster with cached handles) */
+    NETUDP_CRYPTO_AUTO      = 2  /**< Auto-detect: AES-GCM if AES-NI available, else XChaCha20 (default) */
 } netudp_crypto_mode_t;
 
 /* --- Channel config --- */

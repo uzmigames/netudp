@@ -9,6 +9,7 @@
 #include "connection/connect_token.h"
 #include "crypto/xchacha.h"
 #include "crypto/random.h"
+#include "crypto/aead_dispatch.h"
 #include "crypto/vendor/monocypher.h"
 #include "profiling/profiler.h"
 
@@ -34,8 +35,10 @@ int netudp_init(void) {
         return NETUDP_OK;
     }
     g_detected_simd_level = netudp::simd::detect_and_set();
+    netudp::crypto::aead_dispatch_init(NETUDP_CRYPTO_AUTO);
     int sock_err = netudp::socket_platform_init();
     if (sock_err != NETUDP_OK) {
+        netudp::crypto::aead_dispatch_term();
         g_initialized.store(false);
         return sock_err;
     }
@@ -46,6 +49,7 @@ void netudp_term(void) {
     if (!g_initialized.exchange(false)) {
         return;
     }
+    netudp::crypto::aead_dispatch_term();
     netudp::socket_platform_term();
     netudp::simd::g_simd = nullptr;
     g_detected_simd_level = NETUDP_SIMD_GENERIC;

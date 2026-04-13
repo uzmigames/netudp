@@ -37,12 +37,20 @@ bool cpu_has_aesni();
 
 /**
  * Initialize AEAD dispatch based on requested crypto mode.
- * @param mode  NETUDP_CRYPTO_XCHACHA20 or NETUDP_CRYPTO_AES_GCM.
+ * @param mode  NETUDP_CRYPTO_XCHACHA20, NETUDP_CRYPTO_AES_GCM, or
+ *              NETUDP_CRYPTO_AUTO (auto-detect best algorithm).
  *              AES_GCM falls back to XChaCha20 if AES-NI is not available.
  */
 void aead_dispatch_init(int mode);
 
-/* AES-256-GCM implementations (defined in aead_aesgcm.cpp) */
+/** Release cached AES-GCM algorithm handles. Called from netudp_term(). */
+void aead_dispatch_term();
+
+/* AES-256-GCM lifecycle (defined in aead_aesgcm.cpp) */
+bool aesgcm_init();
+void aesgcm_term();
+
+/* AES-256-GCM encrypt/decrypt (defined in aead_aesgcm.cpp) */
 int aesgcm_encrypt(const uint8_t key[32], const uint8_t nonce[24],
                     const uint8_t* aad, int aad_len,
                     const uint8_t* pt, int pt_len,

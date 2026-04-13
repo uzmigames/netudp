@@ -33,27 +33,52 @@ bool cpu_has_aesni() {
 #endif
 }
 
+static bool try_select_aesgcm() {
+#ifdef NETUDP_PLATFORM_WINDOWS
+    if (!cpu_has_aesni()) {
+        NLOG_WARN("[netudp] crypto: AES-NI not available, using XChaCha20");
+        return false;
+    }
+    if (!aesgcm_init()) {
+        NLOG_WARN("[netudp] crypto: BCrypt AES-GCM init failed, using XChaCha20");
+        return false;
+    }
+    g_aead_encrypt = aesgcm_encrypt;
+    g_aead_decrypt = aesgcm_decrypt;
+    NLOG_INFO("[netudp] crypto: AES-256-GCM selected (BCrypt + AES-NI, cached handles)");
+    return true;
+#else
+    NLOG_WARN("[netudp] crypto: AES-GCM not available on this platform, using XChaCha20");
+    return false;
+#endif
+}
+
+static void select_xchacha20() {
+    g_aead_encrypt = aead_encrypt;
+    g_aead_decrypt = aead_decrypt;
+    NLOG_INFO("[netudp] crypto: XChaCha20-Poly1305 selected");
+}
+
 void aead_dispatch_init(int mode) {
     if (mode == NETUDP_CRYPTO_AES_GCM) {
-#ifdef NETUDP_PLATFORM_WINDOWS
-        /* BCrypt AES-GCM available on Windows Vista+ (always present) */
-        if (cpu_has_aesni()) {
-            g_aead_encrypt = aesgcm_encrypt;
-            g_aead_decrypt = aesgcm_decrypt;
-            NLOG_INFO("[netudp] crypto: AES-256-GCM selected (BCrypt + AES-NI)");
-            return;
+        if (!try_select_aesgcm()) {
+            select_xchacha20();
         }
-        NLOG_WARN("[netudp] crypto: AES-GCM requested but AES-NI not available, using XChaCha20");
-#else
-        NLOG_WARN("[netudp] crypto: AES-GCM not available on this platform, using XChaCha20");
-#endif
-        g_aead_encrypt = aead_encrypt;
-        g_aead_decrypt = aead_decrypt;
+    } else if (mode == NETUDP_CRYPTO_AUTO) {
+        /* Auto-detect: prefer AES-GCM when AES-NI is available */
+        if (!try_select_aesgcm()) {
+            select_xchacha20();
+        }
     } else {
-        g_aead_encrypt = aead_encrypt;
-        g_aead_decrypt = aead_decrypt;
-        NLOG_INFO("[netudp] crypto: XChaCha20-Poly1305 selected (default)");
+        /* NETUDP_CRYPTO_XCHACHA20 or unknown — explicit XChaCha20 */
+        select_xchacha20();
     }
+}
+
+void aead_dispatch_term() {
+    aesgcm_term();
+    g_aead_encrypt = aead_encrypt;
+    g_aead_decrypt = aead_decrypt;
 }
 
 } // namespace netudp::crypto
