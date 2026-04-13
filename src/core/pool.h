@@ -103,7 +103,10 @@ public:
         return *this;
     }
 
-    /** Acquire an element from the pool. Returns nullptr if empty. O(1). */
+    /**
+     * Acquire an element from the pool. Returns nullptr if empty. O(1).
+     * Element is already zeroed (cleaned at release time, not acquire time).
+     */
     T* acquire() {
         if (free_head_ == nullptr) {
             return nullptr;
@@ -117,20 +120,27 @@ public:
         std::memcpy(&next, element, PTR_SZ);
         free_head_ = static_cast<T*>(next);
 
-        /* Zero the element before returning */
-        std::memset(element, 0, sizeof(T));
+        /* Clear the free-list pointer residue (first pointer-sized bytes) */
+        std::memset(element, 0, PTR_SZ);
 
         --available_;
         return element;
     }
 
-    /** Release an element back to the pool. O(1). */
+    /**
+     * Release an element back to the pool. O(1).
+     * Zeroes the element before adding to free-list (release-time cleaning),
+     * so acquire() gets a clean element without paying the memset cost.
+     */
     void release(T* element) {
         if (element == nullptr) {
             return;
         }
 
-        /* Store current head in element's memory */
+        /* Zero the element (cold path — amortizes cost away from acquire) */
+        std::memset(element, 0, sizeof(T));
+
+        /* Store current head in element's memory (overwrites first bytes) */
         void* head_ptr = free_head_;
         std::memcpy(element, &head_ptr, sizeof(void*));
         free_head_ = element;
