@@ -308,19 +308,25 @@ static void connection_worker_fn(netudp_server* server, int worker_id) {
             int i = server->active_slots[a];
             netudp::Connection& conn = server->connections[i];
 
-            /* Bandwidth refill */
+            /* Fast-path: idle peer */
+            bool needs_keepalive = (time - conn.last_send_time > 1.0);
+            if (conn.pending_mask == 0 && !needs_keepalive) {
+                if (time >= conn.next_slow_tick) {
+                    conn.next_slow_tick = time + 0.1;
+                    if (conn.cdata != nullptr) { conn.frag().cleanup_timeout(time); }
+                    conn.congestion.evaluate();
+                }
+                continue;
+            }
+
             conn.bandwidth.refill(time);
             conn.budget.refill(dt, conn.congestion.send_rate());
-
-            /* Send pending channel data */
             netudp::server_send_pending(server, i);
 
-            /* Keepalive */
-            if (time - conn.last_send_time > 1.0) {
+            if (needs_keepalive) {
                 netudp::server_send_keepalive(server, i);
             }
 
-            /* Slow tick */
             if (time >= conn.next_slow_tick) {
                 conn.next_slow_tick = time + 0.1;
                 conn.stats.update_throughput(time);
@@ -747,7 +753,8 @@ void netudp_server_update(netudp_server_t* server, double time) {
         QueuedInPacket qpkt;
         int drained = 0;
         while (server->recv_queue->pop(&qpkt) && drained < 4096) {
-            if (!server->rate_limiter.allow(&qpkt.addr, time)) {
+            const int* known_pipe = server->address_to_slot.find(qpkt.addr);
+            if (known_pipe == nullptr && !server->rate_limiter.allow(&qpkt.addr, time)) {
                 server->ddos.on_bad_packet();
             } else if (server->sim_enabled) {
                 server->sim.submit(qpkt.data, qpkt.len, &qpkt.addr, time);
@@ -775,9 +782,15 @@ void netudp_server_update(netudp_server_t* server, double time) {
                 const void*       pkt_buf = server->batch_pkts[i].data;
                 int               pkt_len = server->batch_pkts[i].len;
 
-                if (!server->rate_limiter.allow(from, time)) {
-                    server->ddos.on_bad_packet();
-                    continue;
+                /* Fast-path: known peers bypass rate limiter (ENet pattern).
+                 * Rate limiting only applies to unknown/unauthenticated packets. */
+                const int* known = server->address_to_slot.find(*from);
+                if (known == nullptr) {
+                    /* Unknown address — rate limit before processing */
+                    if (!server->rate_limiter.allow(from, time)) {
+                        server->ddos.on_bad_packet();
+                        continue;
+                    }
                 }
 
                 if (server->sim_enabled) {
@@ -870,11 +883,29 @@ void netudp_server_update(netudp_server_t* server, double time) {
             int i = server->active_slots[a];
             netudp::Connection& conn = server->connections[i];
 
+            /* Fast-path: idle peer with nothing to send and no keepalive due.
+             * ENet does ~8 inline ops for idle peers. We do 2 comparisons. */
+            bool needs_keepalive = (time - conn.last_send_time > 1.0);
+            if (conn.pending_mask == 0 && !needs_keepalive) {
+                /* Only slow tick check for idle peers */
+                if (time >= conn.next_slow_tick) {
+                    conn.next_slow_tick = time + 0.1;
+                    conn.stats.update_throughput(time);
+                    conn.stats.ping_ms = conn.rtt.ping_ms();
+                    conn.stats.send_rate_bytes_per_sec = conn.congestion.send_rate();
+                    conn.stats.max_send_rate_bytes_per_sec = conn.congestion.max_send_rate();
+                    if (conn.cdata != nullptr) { conn.frag().cleanup_timeout(time); }
+                    conn.congestion.evaluate();
+                }
+                continue;
+            }
+
+            /* Full path: peer has data to send or keepalive due */
             conn.bandwidth.refill(time);
             conn.budget.refill(dt, conn.congestion.send_rate());
             netudp::server_send_pending(server, i);
 
-            if (time - conn.last_send_time > 1.0) {
+            if (needs_keepalive) {
                 netudp::server_send_keepalive(server, i);
             }
 
