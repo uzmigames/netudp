@@ -23,6 +23,7 @@ option(NETUDP_ENABLE_TRACY "Integrate Tracy profiler (requires network access)" 
 option(NETUDP_DISABLE_PROFILING "Compile out built-in profiler (zero overhead)" OFF)
 option(NETUDP_ENABLE_IO_URING "Enable io_uring socket backend (Linux 5.7+)" OFF)
 option(NETUDP_ENABLE_RIO "Enable Registered I/O socket backend (Windows 8+)" OFF)
+option(NETUDP_BUILD_SHARED "Build shared library (DLL/SO) in addition to static" OFF)
 
 # --- io_uring detection (Linux only) ---
 if(NETUDP_ENABLE_IO_URING AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -71,7 +72,7 @@ endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # --- netudp static library ---
-add_library(netudp STATIC
+set(NETUDP_SOURCES
     src/api.cpp
     src/server.cpp
     src/client.cpp
@@ -96,6 +97,54 @@ add_library(netudp STATIC
     src/simd/simd_neon.cpp
     src/profiling/profiler.cpp
 )
+
+# --- Static library (always built) ---
+add_library(netudp STATIC ${NETUDP_SOURCES})
+
+# --- Shared library (opt-in via -DNETUDP_BUILD_SHARED=ON) ---
+if(NETUDP_BUILD_SHARED)
+    add_library(netudp_shared SHARED ${NETUDP_SOURCES})
+    set_target_properties(netudp_shared PROPERTIES
+        OUTPUT_NAME netudp
+        WINDOWS_EXPORT_ALL_SYMBOLS ON
+    )
+    target_compile_definitions(netudp_shared PRIVATE NETUDP_BUILDING_DLL=1)
+    target_include_directories(netudp_shared
+        PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:include>
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_compile_definitions(netudp_shared PRIVATE
+        $<$<BOOL:${NETUDP_CRC32_ONLY}>:NETUDP_CRC32_ONLY=1>
+        $<$<BOOL:${NETUDP_ENABLE_AVX512}>:NETUDP_ENABLE_AVX512=1>
+        $<$<BOOL:${NETUDP_HAS_NETC}>:NETUDP_HAS_NETC=1>
+        $<$<BOOL:${NETUDP_HAS_TRACY}>:NETUDP_ENABLE_TRACY=1>
+        $<$<BOOL:${NETUDP_DISABLE_PROFILING}>:NETUDP_DISABLE_PROFILING=1>
+        $<$<BOOL:${NETUDP_HAS_IO_URING}>:NETUDP_HAS_IO_URING=1>
+        $<$<BOOL:${NETUDP_ENABLE_RIO}>:NETUDP_HAS_RIO=1>
+        $<$<BOOL:${WIN32}>:NOMINMAX>
+        $<$<BOOL:${WIN32}>:_CRT_SECURE_NO_WARNINGS>
+    )
+    if(NOT MSVC)
+        set_source_files_properties(src/simd/simd_sse42.cpp TARGET_DIRECTORY netudp_shared
+            PROPERTIES COMPILE_FLAGS "-msse4.2 -mpopcnt -mbmi")
+        set_source_files_properties(src/simd/simd_avx2.cpp TARGET_DIRECTORY netudp_shared
+            PROPERTIES COMPILE_FLAGS "-mavx2 -mbmi2")
+    endif()
+    if(WIN32)
+        target_link_libraries(netudp_shared PRIVATE ws2_32 bcrypt)
+    endif()
+    if(NETUDP_HAS_IO_URING)
+        target_include_directories(netudp_shared PRIVATE ${LIBURING_INCLUDE})
+        target_link_libraries(netudp_shared PRIVATE ${LIBURING_LIB})
+    endif()
+    if(NETUDP_HAS_NETC)
+        target_link_libraries(netudp_shared PRIVATE netc)
+        target_include_directories(netudp_shared PRIVATE ${netc_SOURCE_DIR}/include)
+    endif()
+endif()
 
 # --- Per-file SIMD compile flags (non-MSVC only, MSVC enables intrinsics by default) ---
 if(NOT MSVC)

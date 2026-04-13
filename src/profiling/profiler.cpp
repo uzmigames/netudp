@@ -10,8 +10,8 @@
 #include <cstring>
 #include <climits>
 
-#ifdef NETUDP_ENABLE_TRACY
-/* Tracy mode — stubs only (Tracy owns all profiling). */
+#if defined(NETUDP_DISABLE_PROFILING) || defined(NETUDP_ENABLE_TRACY)
+/* Profiling disabled at compile time or Tracy mode — header provides inline stubs. */
 #else
 
 /* ======================================================================
