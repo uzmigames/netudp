@@ -13,26 +13,61 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            compiler: msvc
+            name: Windows (MSVC)
             cmake_args: ""
-          - os: ubuntu-latest
-            compiler: gcc
+          - os: ubuntu-22.04
+            name: Linux (GCC 12)
             cmake_args: "-DCMAKE_C_COMPILER=gcc-12 -DCMAKE_CXX_COMPILER=g++-12"
-          - os: macos-latest
-            compiler: clang
+          - os: macos-14
+            name: macOS (Clang)
             cmake_args: ""
 
     runs-on: ${{ matrix.os }}
-    name: ${{ matrix.os }} (${{ matrix.compiler }})
+    name: ${{ matrix.name }}
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DNETUDP_BUILD_TESTS=ON ${{ matrix.cmake_args }}
+        run: >
+          cmake -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DNETUDP_BUILD_TESTS=ON
+          ${{ matrix.cmake_args }}
 
       - name: Build
         run: cmake --build build --config Release -j 4
 
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
+
+  # Verify shared library builds
+  shared:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: DLL (Windows)
+            cmake_args: ""
+          - os: ubuntu-22.04
+            name: SO (Linux)
+            cmake_args: "-DCMAKE_C_COMPILER=gcc-12 -DCMAKE_CXX_COMPILER=g++-12"
+
+    runs-on: ${{ matrix.os }}
+    name: Shared ${{ matrix.name }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (shared)
+        run: >
+          cmake -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DNETUDP_BUILD_TESTS=OFF
+          -DNETUDP_BUILD_SHARED=ON
+          -DNETUDP_DISABLE_PROFILING=ON
+          ${{ matrix.cmake_args }}
+
+      - name: Build (shared)
+        run: cmake --build build --config Release -j 4

@@ -1,0 +1,197 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g. v1.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: win-x64
+            shared_ext: dll
+            static_ext: lib
+            cmake_extra: ""
+          - os: ubuntu-22.04
+            target: linux-x64
+            shared_ext: so
+            static_ext: a
+            cmake_extra: "-DCMAKE_C_COMPILER=gcc-12 -DCMAKE_CXX_COMPILER=g++-12"
+          - os: macos-14
+            target: macos-arm64
+            shared_ext: dylib
+            static_ext: a
+            cmake_extra: ""
+
+    runs-on: ${{ matrix.os }}
+    name: Build (${{ matrix.target }})
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          choco install zig -y
+          zig version
+
+      - name: Install Zig (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo snap install zig --classic --beta || true
+          which zig && zig version || echo "zig not available, using gcc"
+
+      - name: Install Zig (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install zig || true
+          which zig && zig version || echo "zig not available, using clang"
+
+      - name: Install Ninja
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y ninja-build
+
+      - name: Install Ninja (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      # Build static library + tests
+      - name: Configure (static + tests)
+        run: >
+          cmake -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DNETUDP_BUILD_TESTS=ON
+          -DNETUDP_BUILD_SHARED=OFF
+          -DNETUDP_DISABLE_PROFILING=OFF
+          ${{ matrix.cmake_extra }}
+
+      - name: Build (static)
+        run: cmake --build build --config Release -j 4
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      # Build shared library (DLL/SO/dylib) for distribution
+      - name: Configure (shared)
+        run: >
+          cmake -B build-shared
+          -DCMAKE_BUILD_TYPE=Release
+          -DNETUDP_BUILD_TESTS=OFF
+          -DNETUDP_BUILD_SHARED=ON
+          -DNETUDP_DISABLE_PROFILING=ON
+          ${{ matrix.cmake_extra }}
+
+      - name: Build (shared)
+        run: cmake --build build-shared --config Release -j 4
+
+      # Package distribution
+      - name: Package
+        shell: bash
+        run: |
+          DIST="dist/netudp-${{ matrix.target }}"
+          mkdir -p "$DIST/include/netudp"
+          mkdir -p "$DIST/lib"
+          mkdir -p "$DIST/sdk/cpp"
+
+          # Headers
+          cp include/netudp/*.h "$DIST/include/netudp/"
+
+          # Static lib
+          find build -maxdepth 2 \( -name "libnetudp.a" -o -name "netudp.lib" \) \
+            -exec cp {} "$DIST/lib/" \; 2>/dev/null || true
+          find build/Release -maxdepth 1 \( -name "netudp.lib" \) \
+            -exec cp {} "$DIST/lib/" \; 2>/dev/null || true
+
+          # Shared lib
+          find build-shared -maxdepth 2 \( \
+            -name "*.dll" -o -name "*.dll.a" -o \
+            -name "*.so" -o -name "*.dylib" -o \
+            -name "libnetudp.*" \) \
+            -exec cp {} "$DIST/lib/" \; 2>/dev/null || true
+          find build-shared/Release -maxdepth 1 \( \
+            -name "*.dll" -o -name "*.lib" \) \
+            -exec cp {} "$DIST/lib/" \; 2>/dev/null || true
+
+          # SDK
+          cp sdk/cpp/netudp.hpp "$DIST/sdk/cpp/"
+          cp sdk/cpp/README.md "$DIST/sdk/cpp/"
+          cp sdk/cpp/example.cpp "$DIST/sdk/cpp/"
+
+          # License
+          cp LICENSE "$DIST/" 2>/dev/null || true
+
+          # List contents
+          echo "=== Distribution: $DIST ==="
+          find "$DIST" -type f | sort
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: netudp-${{ matrix.target }}
+          path: dist/netudp-${{ matrix.target }}
+          retention-days: 30
+
+  # Combine all platforms into one release
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create combined package
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME:-${{ github.event.inputs.version }}}"
+          COMBINED="netudp-${VERSION}"
+          mkdir -p "$COMBINED/include/netudp"
+          mkdir -p "$COMBINED/sdk/cpp"
+
+          # Headers + SDK (same across platforms, take from any)
+          cp artifacts/netudp-win-x64/include/netudp/*.h "$COMBINED/include/netudp/"
+          cp artifacts/netudp-win-x64/sdk/cpp/* "$COMBINED/sdk/cpp/"
+          cp artifacts/netudp-win-x64/LICENSE "$COMBINED/" 2>/dev/null || true
+
+          # Per-platform libs
+          for platform in win-x64 linux-x64 macos-arm64; do
+            if [ -d "artifacts/netudp-${platform}/lib" ]; then
+              mkdir -p "$COMBINED/lib/${platform}"
+              cp artifacts/netudp-${platform}/lib/* "$COMBINED/lib/${platform}/"
+            fi
+          done
+
+          echo "=== Combined package ==="
+          find "$COMBINED" -type f | sort
+
+          # Create archives
+          tar czf "${COMBINED}.tar.gz" "$COMBINED"
+          zip -r "${COMBINED}.zip" "$COMBINED"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name || github.event.inputs.version }}
+          name: netudp ${{ github.ref_name || github.event.inputs.version }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            netudp-*.tar.gz
+            netudp-*.zip
