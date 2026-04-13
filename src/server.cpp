@@ -43,6 +43,91 @@ struct IOWorker {
 };
 
 /* ======================================================================
+ * Recv/Send pipeline queues (for PIPELINE threading mode)
+ * ====================================================================== */
+
+/** Queued inbound packet — copied from socket into recv ring. */
+struct QueuedInPacket {
+    netudp_address_t addr;
+    uint8_t          data[NETUDP_MAX_PACKET_ON_WIRE];
+    int              len = 0;
+};
+
+/** Queued outbound packet — ready to send via socket. */
+struct QueuedOutPacket {
+    netudp_address_t addr;
+    uint8_t          data[NETUDP_MAX_PACKET_ON_WIRE];
+    int              len = 0;
+};
+
+/** Thread-safe SPSC-style packet queue (single producer, single consumer). */
+static constexpr int kPipelineQueueSize = 4096;
+
+struct PipelineRecvQueue {
+    QueuedInPacket  ring[kPipelineQueueSize];
+    std::atomic<int> head{0};  /* Producer writes here */
+    std::atomic<int> tail{0};  /* Consumer reads here */
+
+    bool push(const netudp_address_t* addr, const uint8_t* data, int len) {
+        int h = head.load(std::memory_order_relaxed);
+        int next = (h + 1) % kPipelineQueueSize;
+        if (next == tail.load(std::memory_order_acquire)) {
+            return false; /* Full */
+        }
+        ring[h].addr = *addr;
+        std::memcpy(ring[h].data, data, static_cast<size_t>(len));
+        ring[h].len = len;
+        head.store(next, std::memory_order_release);
+        return true;
+    }
+
+    bool pop(QueuedInPacket* out) {
+        int t = tail.load(std::memory_order_relaxed);
+        if (t == head.load(std::memory_order_acquire)) {
+            return false; /* Empty */
+        }
+        *out = ring[t];
+        tail.store((t + 1) % kPipelineQueueSize, std::memory_order_release);
+        return true;
+    }
+
+    int count() const {
+        int h = head.load(std::memory_order_relaxed);
+        int t = tail.load(std::memory_order_relaxed);
+        return (h >= t) ? (h - t) : (kPipelineQueueSize - t + h);
+    }
+};
+
+struct PipelineSendQueue {
+    QueuedOutPacket ring[kPipelineQueueSize];
+    std::atomic<int> head{0};
+    std::atomic<int> tail{0};
+
+    bool push(const netudp_address_t* addr, const uint8_t* data, int len) {
+        int h = head.load(std::memory_order_relaxed);
+        int next = (h + 1) % kPipelineQueueSize;
+        if (next == tail.load(std::memory_order_acquire)) {
+            return false;
+        }
+        ring[h].addr = *addr;
+        std::memcpy(ring[h].data, data, static_cast<size_t>(len));
+        ring[h].len = len;
+        head.store(next, std::memory_order_release);
+        return true;
+    }
+
+    bool pop(QueuedOutPacket* out) {
+        int t = tail.load(std::memory_order_relaxed);
+        if (t == head.load(std::memory_order_acquire)) {
+            return false;
+        }
+        *out = ring[t];
+        tail.store((t + 1) % kPipelineQueueSize, std::memory_order_release);
+        return true;
+    }
+};
+
+/* ======================================================================
  * Server struct — global scope to match forward decl in netudp_types.h
  * ====================================================================== */
 
@@ -98,6 +183,14 @@ struct netudp_server {
     /* O(1) address → slot dispatch (replaces O(N) linear scan) */
     netudp::FixedHashMap<netudp_address_t, int, 4096> address_to_slot;
 
+    /* Pipeline threading (recv thread + send thread + game thread) */
+    bool pipeline_mode = false;
+    PipelineRecvQueue* recv_queue = nullptr;
+    PipelineSendQueue* send_queue = nullptr;
+    std::thread recv_thread;
+    std::thread send_thread;
+    std::atomic<bool> pipeline_running{false};
+
     /* Active connection tracking — iterate O(active) not O(max_clients) */
     int* active_slots = nullptr;   /* Compact list of active slot indices */
     int  active_count = 0;
@@ -114,6 +207,70 @@ void server_handle_data_packet(netudp_server* server, int slot,
     const uint8_t* packet, int packet_len);
 void server_send_pending(netudp_server* server, int slot);
 void server_send_keepalive(netudp_server* server, int slot);
+}
+
+/* ======================================================================
+ * Pipeline thread functions
+ * ====================================================================== */
+
+/** Recv thread: tight loop pulling packets from socket into recv_queue. */
+static void pipeline_recv_thread(netudp_server* server) {
+    uint8_t batch_storage[netudp::kSocketBatchMax][NETUDP_MAX_PACKET_ON_WIRE] = {};
+    netudp::SocketPacket batch_pkts[netudp::kSocketBatchMax] = {};
+
+    while (server->pipeline_running.load(std::memory_order_relaxed)) {
+        for (int i = 0; i < netudp::kSocketBatchMax; ++i) {
+            batch_pkts[i].data = batch_storage[i];
+        }
+
+        int n = netudp::socket_recv_batch(&server->socket, batch_pkts,
+                                           netudp::kSocketBatchMax,
+                                           NETUDP_MAX_PACKET_ON_WIRE);
+        if (n <= 0) {
+            /* No data — yield briefly to avoid spinning */
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
+            continue;
+        }
+
+        for (int i = 0; i < n; ++i) {
+            server->recv_queue->push(
+                &batch_pkts[i].addr,
+                static_cast<const uint8_t*>(batch_pkts[i].data),
+                batch_pkts[i].len);
+        }
+    }
+}
+
+/** Send thread: drains send_queue and calls socket_send in batches. */
+static void pipeline_send_thread(netudp_server* server) {
+    while (server->pipeline_running.load(std::memory_order_relaxed)) {
+        QueuedOutPacket pkt;
+        bool sent_any = false;
+
+        /* Drain up to kSocketBatchMax packets per iteration */
+        for (int i = 0; i < netudp::kSocketBatchMax; ++i) {
+            if (!server->send_queue->pop(&pkt)) {
+                break;
+            }
+            netudp::socket_send(&server->socket, &pkt.addr, pkt.data, pkt.len);
+            sent_any = true;
+        }
+
+        if (!sent_any) {
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
+        }
+    }
+}
+
+/** Send a packet: either directly via socket or via send_queue in pipeline mode. */
+static void server_send_packet(netudp_server* server,
+                                const netudp_address_t* dest,
+                                const uint8_t* data, int len) {
+    if (server->pipeline_mode && server->send_queue != nullptr) {
+        server->send_queue->push(dest, data, len);
+    } else {
+        netudp::socket_send(&server->socket, dest, data, len);
+    }
 }
 
 /** Remove slot from active list (swap-remove O(1)) and push to free stack. */
@@ -249,6 +406,19 @@ void netudp_server_start(netudp_server_t* server, int max_clients) {
 
     netudp::crypto::random_bytes(server->challenge_key, 32);
     server->challenge_sequence = 0;
+
+    /* Start pipeline threads if num_io_threads >= 2 */
+    if (server->num_io_threads >= 2) {
+        server->pipeline_mode = true;
+        server->recv_queue = new (std::nothrow) PipelineRecvQueue();
+        server->send_queue = new (std::nothrow) PipelineSendQueue();
+        if (server->recv_queue != nullptr && server->send_queue != nullptr) {
+            server->pipeline_running.store(true, std::memory_order_release);
+            server->recv_thread = std::thread(pipeline_recv_thread, server);
+            server->send_thread = std::thread(pipeline_send_thread, server);
+            NLOG_INFO("[netudp] pipeline mode: recv + send threads started");
+        }
+    }
 }
 
 void netudp_server_stop(netudp_server_t* server) {
@@ -256,6 +426,19 @@ void netudp_server_stop(netudp_server_t* server) {
         return;
     }
     server->running = false;
+
+    /* Stop pipeline threads */
+    if (server->pipeline_mode) {
+        server->pipeline_running.store(false, std::memory_order_release);
+        if (server->recv_thread.joinable()) { server->recv_thread.join(); }
+        if (server->send_thread.joinable()) { server->send_thread.join(); }
+        delete server->recv_queue;
+        delete server->send_queue;
+        server->recv_queue = nullptr;
+        server->send_queue = nullptr;
+        server->pipeline_mode = false;
+    }
+
     server->address_to_slot.clear();
 
     if (server->connections != nullptr) {
@@ -446,73 +629,88 @@ void netudp_server_update(netudp_server_t* server, double time) {
     /* DDoS monitor tick */
     server->ddos.update(dt);
 
-    /* Receive packets — batch up to kSocketBatchMax per syscall */
-    for (;;) {
-        /* Set up batch packet pointers into pre-allocated storage */
-        for (int i = 0; i < netudp::kSocketBatchMax; ++i) {
-            server->batch_pkts[i].data = server->batch_storage[i];
-        }
-
-        int n = netudp::socket_recv_batch(&server->socket, server->batch_pkts,
-                                          netudp::kSocketBatchMax,
-                                          NETUDP_MAX_PACKET_ON_WIRE);
-        if (n <= 0) {
-            break;
-        }
-
-        for (int i = 0; i < n; ++i) {
-            netudp_address_t* from    = &server->batch_pkts[i].addr;
-            const void*       pkt_buf = server->batch_pkts[i].data;
-            int               pkt_len = server->batch_pkts[i].len;
-
-            /* Rate limit */
-            if (!server->rate_limiter.allow(from, time)) {
+    /* Receive packets — pipeline mode drains from recv_queue,
+     * single-thread mode calls socket_recv_batch directly. */
+    if (server->pipeline_mode && server->recv_queue != nullptr) {
+        /* Pipeline: drain recv_queue filled by recv thread */
+        QueuedInPacket qpkt;
+        int drained = 0;
+        while (server->recv_queue->pop(&qpkt) && drained < 4096) {
+            if (!server->rate_limiter.allow(&qpkt.addr, time)) {
                 server->ddos.on_bad_packet();
-                continue;
-            }
-
-            if (server->sim_enabled) {
-                server->sim.submit(static_cast<const uint8_t*>(pkt_buf), pkt_len, from, time);
+            } else if (server->sim_enabled) {
+                server->sim.submit(qpkt.data, qpkt.len, &qpkt.addr, time);
             } else {
-                server_dispatch_packet(server, from,
-                                       static_cast<const uint8_t*>(pkt_buf), pkt_len);
+                server_dispatch_packet(server, &qpkt.addr, qpkt.data, qpkt.len);
             }
+            ++drained;
         }
-
-        /* If we got a full batch there may be more — loop again */
-        if (n < netudp::kSocketBatchMax) {
-            break;
-        }
-    }
-
-    /* Drain additional IO worker sockets (multi-threaded mode) */
-    for (int w = 0; w < server->num_io_threads - 1; ++w) {
-        IOWorker& worker = server->io_workers[w];
+    } else {
+        /* Single-thread: recv directly from socket */
         for (;;) {
             for (int i = 0; i < netudp::kSocketBatchMax; ++i) {
-                worker.batch_pkts[i].data = worker.batch_storage[i];
+                server->batch_pkts[i].data = server->batch_storage[i];
             }
-            int n = netudp::socket_recv_batch(&worker.socket, worker.batch_pkts,
+
+            int n = netudp::socket_recv_batch(&server->socket, server->batch_pkts,
                                               netudp::kSocketBatchMax,
                                               NETUDP_MAX_PACKET_ON_WIRE);
-            if (n <= 0) { break; }
+            if (n <= 0) {
+                break;
+            }
+
             for (int i = 0; i < n; ++i) {
-                netudp_address_t* from    = &worker.batch_pkts[i].addr;
-                const void*       pkt_buf = worker.batch_pkts[i].data;
-                int               pkt_len = worker.batch_pkts[i].len;
+                netudp_address_t* from    = &server->batch_pkts[i].addr;
+                const void*       pkt_buf = server->batch_pkts[i].data;
+                int               pkt_len = server->batch_pkts[i].len;
+
                 if (!server->rate_limiter.allow(from, time)) {
                     server->ddos.on_bad_packet();
                     continue;
                 }
+
                 if (server->sim_enabled) {
-                    server->sim.submit(static_cast<const uint8_t*>(pkt_buf),
-                                       pkt_len, from, time);
+                    server->sim.submit(static_cast<const uint8_t*>(pkt_buf), pkt_len, from, time);
                 } else {
                     server_dispatch_packet(server, from,
                                            static_cast<const uint8_t*>(pkt_buf), pkt_len);
                 }
             }
-            if (n < netudp::kSocketBatchMax) { break; }
+
+            if (n < netudp::kSocketBatchMax) {
+                break;
+            }
+        }
+
+        /* Drain additional IO worker sockets (multi-socket, single-thread mode) */
+        for (int w = 0; w < server->num_io_threads - 1; ++w) {
+            IOWorker& worker = server->io_workers[w];
+            for (;;) {
+                for (int i = 0; i < netudp::kSocketBatchMax; ++i) {
+                    worker.batch_pkts[i].data = worker.batch_storage[i];
+                }
+                int n = netudp::socket_recv_batch(&worker.socket, worker.batch_pkts,
+                                                  netudp::kSocketBatchMax,
+                                                  NETUDP_MAX_PACKET_ON_WIRE);
+                if (n <= 0) { break; }
+                for (int i = 0; i < n; ++i) {
+                    netudp_address_t* from    = &worker.batch_pkts[i].addr;
+                    const void*       pkt_buf = worker.batch_pkts[i].data;
+                    int               pkt_len = worker.batch_pkts[i].len;
+                    if (!server->rate_limiter.allow(from, time)) {
+                        server->ddos.on_bad_packet();
+                        continue;
+                    }
+                    if (server->sim_enabled) {
+                        server->sim.submit(static_cast<const uint8_t*>(pkt_buf),
+                                           pkt_len, from, time);
+                    } else {
+                        server_dispatch_packet(server, from,
+                                               static_cast<const uint8_t*>(pkt_buf), pkt_len);
+                    }
+                }
+                if (n < netudp::kSocketBatchMax) { break; }
+            }
         }
     }
 
@@ -1152,7 +1350,7 @@ void server_send_pending(netudp_server* server, int slot) {
             server->send_buf[0] = prefix;
             std::memcpy(server->send_buf + 1, ct, static_cast<size_t>(ct_len));
             int total = 1 + ct_len;
-            socket_send(&server->socket, &conn.address, server->send_buf, total);
+            server_send_packet(server, &conn.address, server->send_buf, total);
             conn.last_send_time = now;
             conn.stats.on_packet_sent(total);
             conn.stats.frames_coalesced += static_cast<uint32_t>(frames_packed);
@@ -1217,7 +1415,7 @@ void server_send_pending(netudp_server* server, int slot) {
             server->send_buf[0] = prefix;
             std::memcpy(server->send_buf + 1, ct, static_cast<size_t>(ct_len));
             int total = 1 + ct_len;
-            socket_send(&server->socket, &conn.address, server->send_buf, total);
+            server_send_packet(server, &conn.address, server->send_buf, total);
             conn.last_send_time = now;
             conn.stats.on_packet_sent(total);
             conn.stats.frames_coalesced += static_cast<uint32_t>(frames_packed);
@@ -1254,7 +1452,7 @@ void server_send_keepalive(netudp_server* server, int slot) {
 
     server->send_buf[0] = prefix;
     std::memcpy(server->send_buf + 1, ct, static_cast<size_t>(ct_len));
-    socket_send(&server->socket, &conn.address, server->send_buf, 1 + ct_len);
+    server_send_packet(server, &conn.address, server->send_buf, 1 + ct_len);
     conn.last_send_time = now;
     conn.last_keepalive_time = now;
 }
