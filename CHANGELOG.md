@@ -14,6 +14,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Compile-time profiling disable**: `-DNETUDP_DISABLE_PROFILING=ON` compiles `NETUDP_ZONE()` to `((void)0)` for zero-overhead production builds. Three profiler modes: disabled (compile-out), built-in (runtime toggle), Tracy (external).
 - **Windows batch I/O optimization**: `socket_send_batch` uses `WSASendTo` with pre-converted addresses; `socket_recv_batch` uses `WSARecvFrom` with `WSABUF`. Eliminates repeated address conversion overhead.
 - **`frames_coalesced` stat**: New counter in `ConnectionStats` tracking how many frames were packed into coalesced packets.
+- **Registered I/O (RIO) backend**: `socket_rio.h`/`socket_rio.cpp` — Windows 8+ zero-syscall-overhead I/O via pre-registered buffers and polled completion queues (same architecture as io_uring). Pre-posted `RIOReceiveEx` with registered address buffers, `RIOSendEx` with `RIONotify` flush. Graceful fallback to WSASendTo loop. CMake: `-DNETUDP_ENABLE_RIO=ON`. Published benchmarks show 4-8x PPS improvement.
+- **Windows socket tuning**: `SIO_LOOPBACK_FAST_PATH` (Win8+, bypasses network stack for localhost ~1us vs ~7us), `UDP_SEND_MSG_SIZE` (Win10 1703+, kernel-level UDP segmentation offload). Applied automatically on socket create.
+- **WFP diagnostic API**: `netudp_windows_is_wfp_active()` detects if Base Filtering Engine is running (WFP adds ~2us/packet = +40% PPS when disabled on dedicated servers).
+- **Windows server tuning guide**: `docs/guides/windows-server-tuning.md` — WFP disable, RSS configuration, interrupt moderation, NIC offloads, power plan, expected PPS per configuration.
+- **Coalescing benchmark**: `bench_coalescing.cpp` — measures multi-msg packing at 1/5/10/20 msgs per tick. Measured 11.4x syscall reduction (137K msgs -> 12K packets).
 - **`netudp_server_num_io_threads()` API**: Query active I/O thread count.
 - **Frame coalescing tests**: 3 new integration tests (`MultipleSmallMessagesArrive`, `MultiChannelCoalescing`, `MixedReliableUnreliable`).
 
@@ -22,23 +27,58 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **AEAD via dispatch**: `packet_crypto.cpp` calls `g_aead_encrypt`/`g_aead_decrypt` function pointers instead of direct `aead_encrypt`/`aead_decrypt`. Enables runtime algorithm selection.
 - Test suite expanded to 353 tests (was 350).
 
-### Performance (Windows 10, i7-12700K, single thread, Release)
+### Fixed
+- **GCC class-memaccess**: replaced `memset` on non-trivial types (`SentMessage`, `ReceivedMessage`, `AddressKey`) with value-initialization (GCC -Werror=class-memaccess).
+- **GCC BMI intrinsic**: added `-mbmi` flag to `simd_sse42.cpp` for `_tzcnt_u32` on GCC 13+.
+- **Shadowed variable**: renamed `flags` to `fl` in non-Windows `fcntl` path to avoid shadowing the function parameter.
+
+### Performance (i7-12700K, single thread, Release)
+
+#### Windows (MSVC) vs Linux (GCC 13, Docker WSL2)
+
+| Metric | Windows | Linux (Docker) | Notes |
+|--------|--------:|---------------:|-------|
+| PPS (1 client) | 73.5K | 48.4K | Docker VM overhead |
+| PPS (4 clients) | 58.1K | 69.4K | **Linux 1.2x** |
+| PPS (16 clients) | 72.9K | 69.9K | ~equal |
+| p50 latency (16 clients) | 9,644 ns | 6,888 ns | **Linux 1.4x** |
+| RTT latency | 17,900 ns | 15,200 ns | **Linux 1.2x** |
+| `packet_encrypt` | 712 ns | 1,417 ns | MSVC optimizes better* |
+| `aead::encrypt` | 583 ns | 1,182 ns | MSVC optimizes better* |
+| `sock::send` | 7,231 ns | 8,298 ns | ~equal (Docker overhead) |
+| CRC32C AVX2 | 22.7x | 22.4x | = |
+
+*Docker/WSL2 container overhead inflates crypto numbers. Native Linux expected faster.
+
+#### v1.0.0 vs v1.1.0 (Windows)
 
 | Metric | v1.0.0 | v1.1.0 | Delta |
 |--------|-------:|-------:|------:|
 | `packet_encrypt` | 948 ns | 712 ns | **-25%** |
 | `packet_decrypt` | 1,020 ns | 815 ns | **-20%** |
-| `aead::encrypt` | 800 ns | 583 ns | **-27%** |
-| `aead::decrypt` | 780 ns | 599 ns | **-23%** |
-| PPS (1 client) | 88K | 88K | = |
 | PPS (16 clients) | 86K | 92K | **+7%** |
 | p50 latency (16 clients) | 9,413 ns | 8,613 ns | **-8.5%** |
-| Memory per slot | 4.4 KB | 4.4 KB | = |
 | Pool::acquire | ~7.8 us | <100 ns | **~78x** |
-| CRC32C (AVX2) | 22.5x | 22.7x | = |
+| Memory per slot | 4.4 KB | 4.4 KB | = |
 
-Frame coalescing impact (estimated, multi-msg-per-tick scenario):
-- 5 msgs x 20B each: 5 packets (285B) -> 1 packet (153B) = **5x fewer syscalls, 46% less bandwidth**
+#### Frame Coalescing (measured, bench_coalescing)
+
+| Metric | Value |
+|--------|------:|
+| Messages queued | 137K |
+| Packets sent | 12K |
+| Coalescing ratio | **11.4x** |
+| Syscall reduction | **11.4x** |
+
+#### Socket Backend Tiers
+
+| Backend | Platform | Expected PPS |
+|---------|----------|-------------:|
+| sendto loop | All | ~138K |
+| WSASendTo batch | Windows | ~138K |
+| recvmmsg/sendmmsg | Linux | ~2M |
+| RIO Polled | Windows 8+ | ~500K-1M |
+| io_uring | Linux 5.7+ | ~7M |
 
 ## [1.0.0] - 2026-04-12
 

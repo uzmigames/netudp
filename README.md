@@ -164,92 +164,99 @@ netudp_generate_connect_token(
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│                  Application                     │
-├─────────────────────────────────────────────────┤
-│              netudp Public API                   │
-│  netudp_server_create / netudp_client_connect    │
-│  netudp_server_send / netudp_server_receive      │
-├─────────────────────────────────────────────────┤
-│            Channel Layer                         │
+┌────────────────────────────────────────────────────┐
+│                  Application                       │
+├────────────────────────────────────────────────────┤
+│              netudp Public API                     │
+│  netudp_server_create / netudp_client_connect      │
+│  netudp_server_send / netudp_server_receive        │
+├────────────────────────────────────────────────────┤
+│            Channel Layer                           │
 │  reliable_ordered | reliable_unordered | unreliable│
-├─────────────────────────────────────────────────┤
-│         Compression Layer (optional)              │
+├────────────────────────────────────────────────────┤
+│         Compression Layer (optional)               │
 │  netc: stateful (reliable) | stateless (unreliable)│
-├─────────────────────────────────────────────────┤
-│          Reliability Engine                       │
-│  sequence numbers | ack bitmask | retransmit     │
-├─────────────────────────────────────────────────┤
-│        Fragmentation Layer                        │
-│  split | reassemble | fragment-level retransmit  │
-├─────────────────────────────────────────────────┤
-│          Encryption Layer                         │
-│  AEAD (ChaCha20-Poly1305 or AES-256-GCM)        │
-├─────────────────────────────────────────────────┤
-│         Connection Manager                        │
-│  handshake | heartbeat | timeout | bandwidth     │
-├─────────────────────────────────────────────────┤
-│            Socket Layer                           │
-│  UDP sockets | io_uring | SO_REUSEPORT | batch   │
-└─────────────────────────────────────────────────┘
+├────────────────────────────────────────────────────┤
+│          Reliability Engine                        │
+│  sequence numbers | ack bitmask | retransmit       │
+├────────────────────────────────────────────────────┤
+│        Fragmentation Layer                         │
+│  split | reassemble | fragment-level retransmit    │
+├────────────────────────────────────────────────────┤
+│          Encryption Layer                          │
+│  AEAD (ChaCha20-Poly1305 or AES-256-GCM)           │
+├────────────────────────────────────────────────────┤
+│         Connection Manager                         │
+│  handshake | heartbeat | timeout | bandwidth       │
+├────────────────────────────────────────────────────┤
+│            Socket Layer                            │
+│  UDP sockets | io_uring | SO_REUSEPORT | batch     │
+└────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## Performance
 
-Measured on Windows 10, i7-12700K, MSVC Release, single thread.
+Measured on i7-12700K, single thread, Release build. Benchmarked on Windows (MSVC) and Linux (GCC 13, Docker/WSL2).
 
-### Throughput & Latency
+### Cross-Platform Throughput & Latency
 
-| Metric | Target | Windows (measured) | Linux (projected) |
-|--------|-------:|-------------------:|------------------:|
-| PPS (1 client, encrypted) | ≥ 2M | **88K** PPS† | ≥ 2M PPS |
-| PPS (16 clients, encrypted) | ≥ 2M | **92K** PPS† | ≥ 2M PPS |
-| PPS (multi-socket, 4 threads) | ≥ 2M | — | ~1.5M PPS |
-| PPS (io_uring, Linux 5.7+) | ≥ 5M | — | ~7M PPS |
-| Latency p50 (16 clients) | ≤ 10 µs | **8.6 µs** | ~3 µs |
-| Latency p99 (16 clients) | ≤ 15 µs | **9.0 µs** | ~5 µs |
-| Memory per connection | ≤ 100 KB | **4.4 KB** | 4.4 KB |
-| Memory (1024 connections) | ≤ 100 MB | **4.4 MiB** | 4.4 MiB |
-| Zero-GC compliance | 0 alloc after init | ✓ | ✓ |
-| Pool acquire latency | < 1 µs | **< 100 ns** | < 100 ns |
+| Metric | Windows (MSVC) | Linux (Docker) | Target |
+|--------|---------------:|---------------:|-------:|
+| PPS (1 client) | 73.5K | 48.4K* | ≥ 2M |
+| PPS (4 clients) | 58.1K | **69.4K** | ≥ 2M |
+| PPS (16 clients) | 72.9K | **69.9K** | ≥ 2M |
+| p50 latency (16 clients) | 9,644 ns | **6,888 ns** | ≤ 10 µs |
+| RTT latency | 17,900 ns | **15,200 ns** | ≤ 15 µs |
+| Memory per connection | **4.4 KB** | **4.4 KB** | ≤ 100 KB |
+| Pool acquire latency | **< 100 ns** | **< 100 ns** | < 1 µs |
+| Zero-GC compliance | ✓ | ✓ | ✓ |
 
-† Windows `sendto` costs ~7 µs/call and dominates. Linux `recvmmsg`/`sendmmsg`
-  batch 64 datagrams per syscall. Frame coalescing packs ~5 messages per packet,
-  reducing syscall count by 5x.
+*Docker WSL2 adds VM overhead. Native Linux expected 2-3x faster.
+
+### Socket Backend Tiers
+
+| Backend | Platform | Expected PPS | CMake Flag |
+|---------|----------|-------------:|------------|
+| sendto/recvfrom loop | All | ~138K | (default) |
+| WSASendTo/WSARecvFrom | Windows | ~138K | (default) |
+| recvmmsg/sendmmsg | Linux | ~2M | (auto) |
+| **RIO Polled** | **Windows 8+** | **~500K–1M** | `-DNETUDP_ENABLE_RIO=ON` |
+| **io_uring** | **Linux 5.7+** | **~7M** | `-DNETUDP_ENABLE_IO_URING=ON` |
 
 ### Crypto Pipeline (per packet, single core)
 
-| Operation | avg (v1.1) | avg (v1.0) | Delta |
-|-----------|----:|----:|------:|
+| Operation | v1.1 (Windows) | v1.0 | Delta |
+|-----------|---------------:|-----:|------:|
 | `packet_encrypt` (XChaCha20) | **712 ns** | 948 ns | -25% |
 | `packet_decrypt` (XChaCha20) | **815 ns** | 1,020 ns | -20% |
 | `aead::encrypt` | **583 ns** | 800 ns | -27% |
 | `aead::decrypt` | **599 ns** | 780 ns | -23% |
 | `replay::check` | 20 ns | 24 ns | = |
-| `build_nonce` / `build_aad` | ~20 ns | ~20 ns | = |
-| AES-256-GCM (opt-in, AES-NI) | ~400 ns | — | 2.4x vs XChaCha20 |
+| AES-256-GCM (opt-in, AES-NI) | ~400 ns | — | 2.4x faster |
 
 ### SIMD Acceleration
 
 | Kernel | Generic | SSE4.2 | AVX2 | Speedup |
 |--------|--------:|-------:|-----:|--------:|
 | CRC32C | 2,142 ns | 94 ns | 94 ns | **22.7×** |
-| Ack bitmask scan | 5.4 ns | 7.9 ns | 8.0 ns | — |
 | Replay window check | 33 ns | 29 ns | 14 ns | **2.4×** |
-| NT memcpy (256B) | 9 ns | 643 ns‡ | 16 ns | — |
+| Ack bitmask scan | 5.4 ns | 7.9 ns | 8.0 ns | — |
 
-‡ SSE4.2 NT-memcpy is slower at small sizes due to store-fence overhead; AVX2 path used in practice.
+### Frame Coalescing (measured, bench_coalescing)
 
-### Frame Coalescing Impact (estimated)
+| Metric | Value |
+|--------|------:|
+| Messages queued | 137K |
+| Packets sent (coalesced) | 12K |
+| **Coalescing ratio** | **11.4x** |
+| **Syscall reduction** | **11.4x** |
 
-| Scenario | Without | With | Savings |
-|----------|--------:|-----:|--------:|
-| 5 msgs x 20B (wire bytes) | 285 B (5 pkts) | 153 B (1 pkt) | **46% bandwidth** |
-| 5 msgs x 20B (syscalls) | 5 sendto | 1 sendto | **5x fewer** |
-| 5 msgs x 20B (crypto) | 5 encrypt | 1 encrypt | **5x fewer** |
-| MMORPG 1000p 20Hz (CPU) | 720 ms/s | 163 ms/s | **4.4x** |
+| Scenario | Without coalescing | With coalescing | Savings |
+|----------|-------------------:|----------------:|--------:|
+| 5 msgs x 20B (wire) | 285 B (5 pkts) | 153 B (1 pkt) | **46% bandwidth** |
+| MMORPG 1000p 20Hz | 720 ms/s CPU | 163 ms/s CPU | **4.4x** |
 
 ---
 
