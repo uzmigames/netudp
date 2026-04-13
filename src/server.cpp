@@ -12,6 +12,7 @@
 #include "crypto/vendor/monocypher.h"
 #include "core/address.h"
 #include "core/allocator.h"
+#include "core/hash_map.h"
 #include "core/log.h"
 #include "wire/frame.h"
 #include "profiling/profiler.h"
@@ -94,6 +95,9 @@ struct netudp_server {
     IOWorker* io_workers = nullptr;
     int num_io_threads = 1;
     netudp_address_t bind_address = {};
+
+    /* O(1) address → slot dispatch (replaces O(N) linear scan) */
+    netudp::FixedHashMap<netudp_address_t, int, 4096> address_to_slot;
 };
 
 /* Forward declarations for internal functions */
@@ -216,6 +220,7 @@ void netudp_server_stop(netudp_server_t* server) {
         return;
     }
     server->running = false;
+    server->address_to_slot.clear();
 
     if (server->connections != nullptr) {
         for (int i = 0; i < server->max_clients; ++i) {
@@ -354,12 +359,9 @@ static void server_dispatch_packet(netudp_server* server,
     } else if ((packet_type >= 0x04 && packet_type <= 0x06) ||
                prefix == netudp::crypto::PACKET_PREFIX_DATA_REKEY) {
         int slot = -1;
-        for (int i = 0; i < server->max_clients; ++i) {
-            if (server->connections[i].active &&
-                netudp_address_equal(&server->connections[i].address, from)) {
-                slot = i;
-                break;
-            }
+        const int* slot_ptr = server->address_to_slot.find(*from);
+        if (slot_ptr != nullptr) {
+            slot = *slot_ptr;
         }
         if (slot >= 0) {
             netudp::server_handle_data_packet(server, slot, data, len);
@@ -497,6 +499,7 @@ void netudp_server_update(netudp_server_t* server, double time) {
             if (server->config.on_disconnect != nullptr) {
                 server->config.on_disconnect(server->config.callback_context, i, -4);
             }
+            server->address_to_slot.remove(conn.address);
             conn.reset();
             continue;
         }
@@ -806,6 +809,9 @@ void server_handle_connection_request(netudp_server* server,
     Connection& conn = server->connections[slot];
     conn.active = true;
     conn.address = *from;
+
+    /* Register in O(1) address→slot map */
+    server->address_to_slot.insert(*from, slot);
     conn.client_id = priv.client_id;
     std::memcpy(conn.user_data, priv.user_data, 256);
     std::memcpy(conn.key_epoch.tx_key, priv.server_to_client_key, 32);
@@ -1010,6 +1016,7 @@ void server_handle_data_packet(netudp_server* server, int slot,
             if (server->config.on_disconnect != nullptr) {
                 server->config.on_disconnect(server->config.callback_context, slot, reason);
             }
+            server->address_to_slot.remove(conn.address);
             conn.reset();
             return;
         } else {
