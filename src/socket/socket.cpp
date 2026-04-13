@@ -84,7 +84,7 @@ static void sockaddr_to_address(const struct sockaddr_storage* ss,
 /* ===== Socket operations ===== */
 
 int socket_create(Socket* out, const netudp_address_t* bind_addr,
-                  int send_buf_size, int recv_buf_size) {
+                  int send_buf_size, int recv_buf_size, int flags) {
     if (out == nullptr || bind_addr == nullptr) {
         return NETUDP_ERROR_INVALID_PARAM;
     }
@@ -100,6 +100,17 @@ int socket_create(Socket* out, const netudp_address_t* bind_addr,
     int reuse = 1;
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR,
                reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+
+    /* SO_REUSEPORT (Linux only — enables kernel-level load balancing across threads) */
+#ifdef __linux__
+    if ((flags & kSocketFlagReusePort) != 0) {
+        int reuseport = 1;
+        setsockopt(sock, SOL_SOCKET, SO_REUSEPORT,
+                   reinterpret_cast<const char*>(&reuseport), sizeof(reuseport));
+    }
+#else
+    (void)flags;
+#endif
 
     /* Buffer sizes */
     setsockopt(sock, SOL_SOCKET, SO_SNDBUF,

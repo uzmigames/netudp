@@ -99,6 +99,20 @@ void netudp_message_release(netudp_message_t* message);
 int netudp_server_receive_batch(netudp_server_t* server,
                                 netudp_message_t** out, int max_messages);
 
+/* --- Threading --- */
+
+/** Returns the number of active I/O threads (1 = single-threaded). */
+int  netudp_server_num_io_threads(const netudp_server_t* server);
+
+/**
+ * Pin an I/O thread to a specific CPU core (Linux only).
+ * @param thread_index  0-based I/O thread index.
+ * @param cpu_id        CPU core to pin to, or -1 to unpin.
+ * @return NETUDP_OK on success, error code on failure.
+ */
+int  netudp_server_set_thread_affinity(netudp_server_t* server,
+                                       int thread_index, int cpu_id);
+
 /* --- Stats --- */
 
 typedef struct netudp_server_stats {

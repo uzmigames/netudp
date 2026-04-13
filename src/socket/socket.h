@@ -58,13 +58,17 @@ int socket_platform_init();
  */
 void socket_platform_term();
 
+/** Socket creation flags. */
+static constexpr int kSocketFlagReusePort = 1; /**< SO_REUSEPORT (Linux only) */
+
 /**
  * Create a non-blocking UDP socket, bind to address.
  * Sets SO_SNDBUF/SO_RCVBUF to send_buf_size/recv_buf_size.
  * IPv6 dual-stack: IPV6_V6ONLY=0 when addr is IPv6.
+ * @param flags  Bitmask of kSocketFlag* (0 for defaults).
  */
 int socket_create(Socket* out, const netudp_address_t* bind_addr,
-                  int send_buf_size, int recv_buf_size);
+                  int send_buf_size, int recv_buf_size, int flags = 0);
 
 /**
  * Send datagram to address. Returns bytes sent or -1 on error.

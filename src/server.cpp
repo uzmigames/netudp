@@ -22,6 +22,24 @@
 #include <ctime>
 #include <new>
 #include <algorithm>
+#include <thread>
+#include <atomic>
+#include <mutex>
+
+/* ======================================================================
+ * IO Worker — one per thread, each owns a socket (SO_REUSEPORT on Linux)
+ * ====================================================================== */
+
+struct IOWorker {
+    netudp::Socket socket;
+    uint8_t recv_buf[NETUDP_MAX_PACKET_ON_WIRE] = {};
+    uint8_t send_buf[NETUDP_MAX_PACKET_ON_WIRE] = {};
+    uint8_t batch_storage[netudp::kSocketBatchMax][NETUDP_MAX_PACKET_ON_WIRE] = {};
+    netudp::SocketPacket batch_pkts[netudp::kSocketBatchMax] = {};
+    std::thread thread;
+    std::atomic<bool> running{false};
+    int thread_index = 0;
+};
 
 /* ======================================================================
  * Server struct — global scope to match forward decl in netudp_types.h
@@ -34,6 +52,7 @@ struct netudp_server {
     netudp_server_config_t config = {};
     uint64_t protocol_id = 0;
 
+    /* Primary socket (thread 0 / single-threaded mode) */
     netudp::Socket socket;
     netudp::Allocator allocator;
     netudp::RateLimiter rate_limiter;
@@ -70,6 +89,11 @@ struct netudp_server {
     /* Packet handler dispatch table — indexed by first byte of message (0-255) */
     netudp_packet_handler_fn packet_handlers[256] = {};
     void*                    packet_handler_ctx[256] = {};
+
+    /* Multi-thread I/O workers (nullptr in single-threaded mode) */
+    IOWorker* io_workers = nullptr;
+    int num_io_threads = 1;
+    netudp_address_t bind_address = {};
 };
 
 /* Forward declarations for internal functions */
@@ -113,10 +137,48 @@ netudp_server_t* netudp_server_create(const char* address,
         delete server;
         return nullptr;
     }
+    server->bind_address = bind_addr;
 
-    if (netudp::socket_create(&server->socket, &bind_addr, 4 * 1024 * 1024, 4 * 1024 * 1024) != NETUDP_OK) {
+    /* Determine thread count (clamped to 1..16) */
+    int num_threads = config->num_io_threads;
+    if (num_threads <= 0) { num_threads = 1; }
+    if (num_threads > 16) { num_threads = 16; }
+    server->num_io_threads = num_threads;
+
+    /* Create primary socket (thread 0) */
+    int sock_flags = 0;
+#ifdef __linux__
+    if (num_threads > 1) { sock_flags = netudp::kSocketFlagReusePort; }
+#endif
+    if (netudp::socket_create(&server->socket, &bind_addr,
+                               4 * 1024 * 1024, 4 * 1024 * 1024, sock_flags) != NETUDP_OK) {
         delete server;
         return nullptr;
+    }
+
+    /* Create additional IO worker sockets for multi-threaded mode */
+    if (num_threads > 1) {
+        server->io_workers = new (std::nothrow) IOWorker[static_cast<size_t>(num_threads - 1)];
+        if (server->io_workers == nullptr) {
+            netudp::socket_destroy(&server->socket);
+            delete server;
+            return nullptr;
+        }
+        for (int i = 0; i < num_threads - 1; ++i) {
+            server->io_workers[i].thread_index = i + 1;
+            if (netudp::socket_create(&server->io_workers[i].socket, &bind_addr,
+                                       4 * 1024 * 1024, 4 * 1024 * 1024, sock_flags) != NETUDP_OK) {
+                /* Cleanup already-created worker sockets */
+                for (int j = 0; j < i; ++j) {
+                    netudp::socket_destroy(&server->io_workers[j].socket);
+                }
+                delete[] server->io_workers;
+                server->io_workers = nullptr;
+                netudp::socket_destroy(&server->socket);
+                delete server;
+                return nullptr;
+            }
+        }
     }
 
     /* Wire network simulator if a config was provided. */
@@ -198,6 +260,51 @@ void netudp_server_get_stats(const netudp_server_t* server,
     out->total_bytes_sent  = bytes_sent;
     out->recv_pps          = pps_in;
     out->send_pps          = pps_out;
+}
+
+int netudp_server_num_io_threads(const netudp_server_t* server) {
+    if (server == nullptr) { return 0; }
+    return server->num_io_threads;
+}
+
+int netudp_server_set_thread_affinity(netudp_server_t* server,
+                                       int thread_index, int cpu_id) {
+    if (server == nullptr) { return NETUDP_ERROR_INVALID_PARAM; }
+    if (thread_index < 0 || thread_index >= server->num_io_threads) {
+        return NETUDP_ERROR_INVALID_PARAM;
+    }
+
+#ifdef __linux__
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    if (cpu_id >= 0) {
+        CPU_SET(cpu_id, &cpuset);
+    }
+
+    /* Thread 0 uses the main thread — set affinity on current thread */
+    if (thread_index == 0) {
+        if (sched_setaffinity(0, sizeof(cpuset), &cpuset) != 0) {
+            return NETUDP_ERROR_SOCKET;
+        }
+        return NETUDP_OK;
+    }
+
+    /* Worker threads (1..N-1) — set affinity on the worker's thread */
+    int worker_idx = thread_index - 1;
+    if (server->io_workers == nullptr || !server->io_workers[worker_idx].running.load()) {
+        return NETUDP_ERROR_INVALID_PARAM;
+    }
+    auto native = server->io_workers[worker_idx].thread.native_handle();
+    if (pthread_setaffinity_np(native, sizeof(cpuset), &cpuset) != 0) {
+        return NETUDP_ERROR_SOCKET;
+    }
+    return NETUDP_OK;
+#else
+    /* Windows / macOS — not implemented yet */
+    (void)thread_index;
+    (void)cpu_id;
+    return NETUDP_OK;
+#endif
 }
 
 /* Dispatch a fully-received (or sim-delivered) packet to the correct handler. */
@@ -296,6 +403,37 @@ void netudp_server_update(netudp_server_t* server, double time) {
         }
     }
 
+    /* Drain additional IO worker sockets (multi-threaded mode) */
+    for (int w = 0; w < server->num_io_threads - 1; ++w) {
+        IOWorker& worker = server->io_workers[w];
+        for (;;) {
+            for (int i = 0; i < netudp::kSocketBatchMax; ++i) {
+                worker.batch_pkts[i].data = worker.batch_storage[i];
+            }
+            int n = netudp::socket_recv_batch(&worker.socket, worker.batch_pkts,
+                                              netudp::kSocketBatchMax,
+                                              NETUDP_MAX_PACKET_ON_WIRE);
+            if (n <= 0) { break; }
+            for (int i = 0; i < n; ++i) {
+                netudp_address_t* from    = &worker.batch_pkts[i].addr;
+                const void*       pkt_buf = worker.batch_pkts[i].data;
+                int               pkt_len = worker.batch_pkts[i].len;
+                if (!server->rate_limiter.allow(from, time)) {
+                    server->ddos.on_bad_packet();
+                    continue;
+                }
+                if (server->sim_enabled) {
+                    server->sim.submit(static_cast<const uint8_t*>(pkt_buf),
+                                       pkt_len, from, time);
+                } else {
+                    server_dispatch_packet(server, from,
+                                           static_cast<const uint8_t*>(pkt_buf), pkt_len);
+                }
+            }
+            if (n < netudp::kSocketBatchMax) { break; }
+        }
+    }
+
     /* Drain simulator-buffered packets that are now due. */
     if (server->sim_enabled) {
         SimDispatchCtx dc{server};
@@ -360,6 +498,16 @@ void netudp_server_destroy(netudp_server_t* server) {
     if (server->running) {
         netudp_server_stop(server);
     }
+
+    /* Destroy IO worker sockets */
+    if (server->io_workers != nullptr) {
+        for (int i = 0; i < server->num_io_threads - 1; ++i) {
+            netudp::socket_destroy(&server->io_workers[i].socket);
+        }
+        delete[] server->io_workers;
+        server->io_workers = nullptr;
+    }
+
     netudp::socket_destroy(&server->socket);
     crypto_wipe(server->challenge_key, sizeof(server->challenge_key));
     delete server;

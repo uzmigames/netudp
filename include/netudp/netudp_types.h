@@ -141,6 +141,9 @@ typedef struct netudp_server_config {
     /* Network simulator (optional, NULL disables) */
     const void* sim_config; /* NetSimConfig*, NULL = disabled */
 
+    /* Threading (Linux only — SO_REUSEPORT multi-thread I/O) */
+    int num_io_threads; /**< Number of I/O threads. 0 or 1 = single-threaded (default). */
+
     /* Logging */
     int  log_level;
     void (*log_callback)(int level, const char* msg);
