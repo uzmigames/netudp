@@ -98,6 +98,13 @@ struct netudp_server {
 
     /* O(1) address → slot dispatch (replaces O(N) linear scan) */
     netudp::FixedHashMap<netudp_address_t, int, 4096> address_to_slot;
+
+    /* Active connection tracking — iterate O(active) not O(max_clients) */
+    int* active_slots = nullptr;   /* Compact list of active slot indices */
+    int  active_count = 0;
+    int* free_slots = nullptr;     /* Stack of available slot indices */
+    int  free_count = 0;
+    int* slot_to_active = nullptr; /* Maps slot index → position in active_slots (-1 if inactive) */
 };
 
 /* Forward declarations for internal functions */
@@ -108,6 +115,24 @@ void server_handle_data_packet(netudp_server* server, int slot,
     const uint8_t* packet, int packet_len);
 void server_send_pending(netudp_server* server, int slot);
 void server_send_keepalive(netudp_server* server, int slot);
+}
+
+/** Remove slot from active list (swap-remove O(1)) and push to free stack. */
+static void server_deactivate_slot(netudp_server* server, int slot) {
+    int active_pos = server->slot_to_active[slot];
+    if (active_pos < 0) { return; }
+
+    /* Swap-remove: move last active into this position */
+    int last = --server->active_count;
+    if (active_pos < last) {
+        int moved_slot = server->active_slots[last];
+        server->active_slots[active_pos] = moved_slot;
+        server->slot_to_active[moved_slot] = active_pos;
+    }
+    server->slot_to_active[slot] = -1;
+
+    /* Push slot back to free stack */
+    server->free_slots[server->free_count++] = slot;
 }
 
 /* ======================================================================
@@ -211,6 +236,18 @@ void netudp_server_start(netudp_server_t* server, int max_clients) {
         }
     }
 
+    /* Initialize active/free slot tracking */
+    auto slot_bytes = static_cast<size_t>(max_clients) * sizeof(int);
+    server->active_slots = static_cast<int*>(server->allocator.allocate(slot_bytes));
+    server->free_slots = static_cast<int*>(server->allocator.allocate(slot_bytes));
+    server->slot_to_active = static_cast<int*>(server->allocator.allocate(slot_bytes));
+    server->active_count = 0;
+    server->free_count = max_clients;
+    for (int i = 0; i < max_clients; ++i) {
+        server->free_slots[i] = max_clients - 1 - i; /* Stack: top = slot 0 */
+        server->slot_to_active[i] = -1;
+    }
+
     netudp::crypto::random_bytes(server->challenge_key, 32);
     server->challenge_sequence = 0;
 }
@@ -229,6 +266,20 @@ void netudp_server_stop(netudp_server_t* server) {
         server->allocator.deallocate(server->connections);
         server->connections = nullptr;
     }
+    if (server->active_slots != nullptr) {
+        server->allocator.deallocate(server->active_slots);
+        server->active_slots = nullptr;
+    }
+    if (server->free_slots != nullptr) {
+        server->allocator.deallocate(server->free_slots);
+        server->free_slots = nullptr;
+    }
+    if (server->slot_to_active != nullptr) {
+        server->allocator.deallocate(server->slot_to_active);
+        server->slot_to_active = nullptr;
+    }
+    server->active_count = 0;
+    server->free_count = 0;
 }
 
 int netudp_server_max_clients(const netudp_server_t* server) {
@@ -472,10 +523,25 @@ void netudp_server_update(netudp_server_t* server, double time) {
         server->sim.poll(time, &dc, sim_deliver_cb);
     }
 
-    /* Per-connection: send pending, keepalive, timeout, stats */
-    for (int i = 0; i < server->max_clients; ++i) {
+    /* Per-connection: send pending, keepalive, timeout, stats.
+     * Iterates active_slots only — O(active) not O(max_clients). */
+    for (int a = 0; a < server->active_count; ) {
+        int i = server->active_slots[a];
         netudp::Connection& conn = server->connections[i];
-        if (!conn.active) {
+
+        /* Timeout check — deactivate removes from active list via swap-remove,
+         * so do NOT increment a (the swapped-in slot needs processing). */
+        if (time - conn.last_recv_time > conn.timeout_seconds) {
+            NLOG_WARN("[netudp] client %llu timed out (slot=%d, idle=%.1fs)",
+                            (unsigned long long)conn.client_id, i,
+                            time - conn.last_recv_time);
+            if (server->config.on_disconnect != nullptr) {
+                server->config.on_disconnect(server->config.callback_context, i, -4);
+            }
+            server->address_to_slot.remove(conn.address);
+            server_deactivate_slot(server, i);
+            conn.reset();
+            /* Don't increment a — swapped element now at position a */
             continue;
         }
 
@@ -491,19 +557,6 @@ void netudp_server_update(netudp_server_t* server, double time) {
             netudp::server_send_keepalive(server, i);
         }
 
-        /* Timeout */
-        if (time - conn.last_recv_time > conn.timeout_seconds) {
-            NLOG_WARN("[netudp] client %llu timed out (slot=%d, idle=%.1fs)",
-                            (unsigned long long)conn.client_id, i,
-                            time - conn.last_recv_time);
-            if (server->config.on_disconnect != nullptr) {
-                server->config.on_disconnect(server->config.callback_context, i, -4);
-            }
-            server->address_to_slot.remove(conn.address);
-            conn.reset();
-            continue;
-        }
-
         /* Stats */
         conn.stats.update_throughput(time);
         conn.stats.ping_ms = conn.rtt.ping_ms();
@@ -513,8 +566,10 @@ void netudp_server_update(netudp_server_t* server, double time) {
         /* Fragment timeout cleanup */
         if (conn.cdata != nullptr) conn.frag().cleanup_timeout(time);
 
-        /* Congestion evaluation (every ~RTT) */
+        /* Congestion evaluation */
         conn.congestion.evaluate();
+
+        ++a;
     }
 
     /* Rate limiter cleanup */
@@ -794,16 +849,11 @@ void server_handle_connection_request(netudp_server* server,
         entry.used = true;
     }
 
-    int slot = -1;
-    for (int i = 0; i < server->max_clients; ++i) {
-        if (!server->connections[i].active) {
-            slot = i;
-            break;
-        }
+    /* O(1) slot allocation from free stack */
+    if (server->free_count <= 0) {
+        return; /* No free slots */
     }
-    if (slot < 0) {
-        return;
-    }
+    int slot = server->free_slots[--server->free_count];
 
     /* Establish connection with full subsystem init */
     Connection& conn = server->connections[slot];
@@ -812,6 +862,10 @@ void server_handle_connection_request(netudp_server* server,
 
     /* Register in O(1) address→slot map */
     server->address_to_slot.insert(*from, slot);
+
+    /* Add to active connection list */
+    server->slot_to_active[slot] = server->active_count;
+    server->active_slots[server->active_count++] = slot;
     conn.client_id = priv.client_id;
     std::memcpy(conn.user_data, priv.user_data, 256);
     std::memcpy(conn.key_epoch.tx_key, priv.server_to_client_key, 32);
@@ -1017,6 +1071,7 @@ void server_handle_data_packet(netudp_server* server, int slot,
                 server->config.on_disconnect(server->config.callback_context, slot, reason);
             }
             server->address_to_slot.remove(conn.address);
+            server_deactivate_slot(server, slot);
             conn.reset();
             return;
         } else {
