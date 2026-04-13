@@ -113,6 +113,15 @@ int  netudp_server_num_io_threads(const netudp_server_t* server);
 int  netudp_server_set_thread_affinity(netudp_server_t* server,
                                        int thread_index, int cpu_id);
 
+/* --- Windows diagnostics --- */
+
+/**
+ * Check if Windows Filtering Platform (WFP) is active.
+ * WFP adds ~2us/packet overhead. Returns 1 if active, 0 if not, -1 on error.
+ * Always returns 0 on non-Windows platforms.
+ */
+int  netudp_windows_is_wfp_active(void);
+
 /* --- Stats --- */
 
 typedef struct netudp_server_stats {

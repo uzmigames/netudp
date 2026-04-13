@@ -1,5 +1,6 @@
 #include "socket.h"
 #include "../profiling/profiler.h"
+#include <netudp/netudp_config.h>
 #include <cstring>
 
 #ifdef __linux__
@@ -108,7 +109,25 @@ int socket_create(Socket* out, const netudp_address_t* bind_addr,
         setsockopt(sock, SOL_SOCKET, SO_REUSEPORT,
                    reinterpret_cast<const char*>(&reuseport), sizeof(reuseport));
     }
-#else
+#endif
+
+#ifdef NETUDP_PLATFORM_WINDOWS
+    /* UDP_SEND_MSG_SIZE (Windows 10 1703+) — enables kernel-level UDP segmentation
+     * offload for coalesced sends. Ignored silently if not supported. */
+    DWORD udp_send_msg_size = NETUDP_MTU;
+    setsockopt(sock, IPPROTO_UDP, UDP_SEND_MSG_SIZE,
+               reinterpret_cast<const char*>(&udp_send_msg_size), sizeof(udp_send_msg_size));
+
+    /* SIO_LOOPBACK_FAST_PATH (Windows 8+) — bypasses network stack for loopback,
+     * reduces latency from ~7µs to ~1µs for localhost testing. */
+#ifndef SIO_LOOPBACK_FAST_PATH
+#define SIO_LOOPBACK_FAST_PATH _WSAIOW(IOC_VENDOR, 16)
+#endif
+    int loopback_fast = 1;
+    DWORD bytes_returned = 0;
+    WSAIoctl(sock, SIO_LOOPBACK_FAST_PATH,
+             &loopback_fast, sizeof(loopback_fast),
+             nullptr, 0, &bytes_returned, nullptr, nullptr);
     (void)flags;
 #endif
 
@@ -133,8 +152,8 @@ int socket_create(Socket* out, const netudp_address_t* bind_addr,
         return NETUDP_ERROR_SOCKET;
     }
 #else
-    int flags = fcntl(sock, F_GETFL, 0);
-    if (flags == -1 || fcntl(sock, F_SETFL, flags | O_NONBLOCK) == -1) {
+    int fl = fcntl(sock, F_GETFL, 0);
+    if (fl == -1 || fcntl(sock, F_SETFL, fl | O_NONBLOCK) == -1) {
         close(sock);
         return NETUDP_ERROR_SOCKET;
     }

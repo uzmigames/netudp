@@ -307,6 +307,36 @@ int netudp_server_set_thread_affinity(netudp_server_t* server,
 #endif
 }
 
+int netudp_windows_is_wfp_active() {
+#ifdef NETUDP_PLATFORM_WINDOWS
+    /* Check if Base Filtering Engine (BFE) service is running.
+     * BFE is the WFP service — when active, every packet traverses WFP callouts
+     * adding ~2µs overhead. Stopping BFE (net stop BFE) removes this cost. */
+    SC_HANDLE scm = OpenSCManager(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (scm == nullptr) { return -1; }
+
+    SC_HANDLE svc = OpenService(scm, TEXT("BFE"), SERVICE_QUERY_STATUS);
+    if (svc == nullptr) {
+        CloseServiceHandle(scm);
+        return -1;
+    }
+
+    SERVICE_STATUS status = {};
+    int result = 0;
+    if (QueryServiceStatus(svc, &status)) {
+        result = (status.dwCurrentState == SERVICE_RUNNING) ? 1 : 0;
+    } else {
+        result = -1;
+    }
+
+    CloseServiceHandle(svc);
+    CloseServiceHandle(scm);
+    return result;
+#else
+    return 0;
+#endif
+}
+
 /* Dispatch a fully-received (or sim-delivered) packet to the correct handler. */
 static void server_dispatch_packet(netudp_server* server,
                                    const netudp_address_t* from,
