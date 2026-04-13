@@ -147,6 +147,10 @@ void netudp_client_connect(netudp_client_t* client, uint8_t connect_token[2048])
     client->state = netudp::ClientState::SENDING_REQUEST;
     client->connect_start_time = client->current_time;
     client->last_send_time = 0.0;
+
+    /* Connect UDP socket to server address — caches route, saves 1-3us per send */
+    const netudp_address_t* dest = &client->server_addresses[client->current_server_index];
+    netudp::socket_connect(&client->socket, dest);
 }
 
 void netudp_client_update(netudp_client_t* client, double time) {
@@ -181,8 +185,7 @@ void netudp_client_update(netudp_client_t* client, double time) {
             std::memcpy(request + rpos, client->connect_token + 61,
                         static_cast<size_t>(priv_bytes));
 
-            const netudp_address_t* dest = &client->server_addresses[client->current_server_index];
-            netudp::socket_send(&client->socket, dest, request, 1078);
+            netudp::socket_send_connected(&client->socket, request, 1078);
             client->last_send_time = time;
         }
 
@@ -218,8 +221,7 @@ void netudp_client_update(netudp_client_t* client, double time) {
             if (ct_len > 0) {
                 client->send_buf[0] = prefix;
                 std::memcpy(client->send_buf + 1, ct, static_cast<size_t>(ct_len));
-                const netudp_address_t* dest = &client->server_addresses[client->current_server_index];
-                netudp::socket_send(&client->socket, dest, client->send_buf, 1 + ct_len);
+                netudp::socket_send_connected(&client->socket, client->send_buf, 1 + ct_len);
                 client->conn.last_send_time = time;
             }
         }
@@ -402,8 +404,6 @@ void client_send_pending(netudp_client* client) {
     AckFields ack = conn.packet_tracker.build_ack_fields(now);
     payload_pos += write_ack_fields(ack, payload + payload_pos);
 
-    const netudp_address_t* dest = &client->server_addresses[client->current_server_index];
-
     int ch_idx = ChannelScheduler::next_channel(conn.cdata->channels, conn.num_channels, now);
     while (ch_idx >= 0) {
         NETUDP_ZONE("cli::coalesce");
@@ -437,7 +437,7 @@ void client_send_pending(netudp_client* client) {
             client->send_buf[0] = prefix;
             std::memcpy(client->send_buf + 1, ct, static_cast<size_t>(ct_len));
             int total = 1 + ct_len;
-            socket_send(&client->socket, dest, client->send_buf, total);
+            socket_send_connected(&client->socket, client->send_buf, total);
             conn.last_send_time = now;
             conn.stats.on_packet_sent(total);
             conn.stats.frames_coalesced += static_cast<uint32_t>(frames_packed);
@@ -490,7 +490,7 @@ void client_send_pending(netudp_client* client) {
             client->send_buf[0] = prefix;
             std::memcpy(client->send_buf + 1, ct, static_cast<size_t>(ct_len));
             int total = 1 + ct_len;
-            socket_send(&client->socket, dest, client->send_buf, total);
+            socket_send_connected(&client->socket, client->send_buf, total);
             conn.last_send_time = now;
             conn.stats.on_packet_sent(total);
             conn.stats.frames_coalesced += static_cast<uint32_t>(frames_packed);

@@ -286,6 +286,39 @@ int socket_recv(Socket* sock, netudp_address_t* from,
     return result;
 }
 
+int socket_connect(Socket* sock, const netudp_address_t* dest) {
+    NETUDP_ZONE("sock::connect");
+    if (sock == nullptr || sock->handle == NETUDP_INVALID_SOCKET || dest == nullptr) {
+        return -1;
+    }
+
+    struct sockaddr_storage ss;
+    int ss_len = 0;
+    address_to_sockaddr(dest, &ss, &ss_len);
+
+    int result = connect(sock->handle, reinterpret_cast<const struct sockaddr*>(&ss), ss_len);
+#ifdef NETUDP_PLATFORM_WINDOWS
+    return (result == SOCKET_ERROR) ? -1 : 0;
+#else
+    return (result < 0) ? -1 : 0;
+#endif
+}
+
+int socket_send_connected(Socket* sock, const void* data, int len) {
+    NETUDP_ZONE("sock::send_conn");
+    if (sock == nullptr || sock->handle == NETUDP_INVALID_SOCKET) {
+        return -1;
+    }
+
+    int result = send(sock->handle, static_cast<const char*>(data), len, 0);
+
+#ifdef NETUDP_PLATFORM_WINDOWS
+    return (result == SOCKET_ERROR) ? -1 : result;
+#else
+    return (result < 0) ? -1 : result;
+#endif
+}
+
 void socket_destroy(Socket* sock) {
     if (sock == nullptr || sock->handle == NETUDP_INVALID_SOCKET) {
         return;

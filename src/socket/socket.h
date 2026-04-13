@@ -83,6 +83,18 @@ int socket_recv(Socket* sock, netudp_address_t* from,
                 void* buf, int buf_len);
 
 /**
+ * Connect UDP socket to a remote address (caches route for send()).
+ * For clients only — saves 1-3us/packet by avoiding route lookup per sendto.
+ */
+int socket_connect(Socket* sock, const netudp_address_t* dest);
+
+/**
+ * Send datagram on a connected socket (uses send() not sendto()).
+ * Must call socket_connect() first. Returns bytes sent or -1.
+ */
+int socket_send_connected(Socket* sock, const void* data, int len);
+
+/**
  * Close socket.
  */
 void socket_destroy(Socket* sock);
