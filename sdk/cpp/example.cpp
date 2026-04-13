@@ -1,8 +1,8 @@
 /**
  * @file example.cpp
- * @brief C++ SDK usage example — echo server + client in one file.
+ * @brief C++ SDK usage example — echo server + client.
  *
- * Build: zig c++ -std=c++17 -I../../include -I. example.cpp -L../../build -lnetudp -o example
+ * Build: zig c++ -std=c++17 -I../../include -I. example.cpp -L../../build/release -lnetudp -o example
  */
 
 #include "netudp.hpp"
@@ -13,41 +13,37 @@
 int main() {
     netudp::Init guard;
 
-    /* Generate a shared key (in production, use a real key from your backend) */
-    uint8_t key[32] = {};
-    for (int i = 0; i < 32; ++i) { key[i] = static_cast<uint8_t>(i + 1); }
+    /* Optional: configure logging and profiling */
+    netudp::set_log_level(netudp::LogLevel::Info);
+    netudp::profiling_enable();
 
-    /* Server config */
-    netudp::ServerConfig srv_cfg;
-    srv_cfg.protocol_id(0x1234567890ABCDEF)
-           .private_key(key)
-           .channels({{netudp::Channel::Unreliable},
-                      {netudp::Channel::ReliableOrdered}});
-
-    /* Create server */
-    netudp::Server server("127.0.0.1:27015", srv_cfg, 0.0);
+    /* Create server — key auto-generated, ping/keepalive/handshake automatic */
+    netudp::Server server("127.0.0.1:27015", "my-game-v1", 64);
     if (!server) {
         std::printf("Failed to create server\n");
         return 1;
     }
-    server.start(64);
-    std::printf("Server started on 127.0.0.1:27015 (max %d clients)\n",
-                server.max_clients());
 
-    /* Generate connect token */
+    std::printf("Server started (max %d clients, protocol=0x%llx)\n",
+                server.max_clients(),
+                static_cast<unsigned long long>(server.get_protocol_id()));
+
+    /* Register callbacks */
+    server.on_connect([](int client, uint64_t id) {
+        std::printf("Client %d connected (id=%llu)\n",
+                    client, static_cast<unsigned long long>(id));
+    });
+
+    server.on_disconnect([](int client, int reason) {
+        std::printf("Client %d disconnected (reason=%d)\n", client, reason);
+    });
+
+    /* Generate a connect token for client ID 42 */
     uint8_t token[2048] = {};
-    netudp::generate_connect_token(
-        {"127.0.0.1:27015"}, 300, 10,
-        42, 0x1234567890ABCDEF, key, nullptr, token);
+    server.generate_token(42, "127.0.0.1:27015", token);
 
-    /* Client config */
-    netudp::ClientConfig cli_cfg;
-    cli_cfg.protocol_id(0x1234567890ABCDEF)
-           .channels({{netudp::Channel::Unreliable},
-                      {netudp::Channel::ReliableOrdered}});
-
-    /* Create client */
-    netudp::Client client(nullptr, cli_cfg, 0.0);
+    /* Create client — game_name must match server */
+    netudp::Client client("my-game-v1");
     if (!client) {
         std::printf("Failed to create client\n");
         return 1;
@@ -62,18 +58,18 @@ int main() {
         client.update(time);
 
         if (client.connected() && tick % 10 == 0) {
-            /* Send a position update via zero-copy buffer */
+            /* Send via zero-copy buffer (fluent API) */
             auto buf = server.acquire_buffer();
             buf.u8(0x01).f32(1.0f).f32(2.0f).f32(3.0f);
             server.send_buffer(0, 0, buf);
 
             /* Or send raw bytes */
             uint8_t ping[] = {0x02, 0x00};
-            client.send(0, ping, sizeof(ping));
+            client.send_unreliable(ping, sizeof(ping));
         }
 
-        /* Receive on server */
-        server.receive_all(64, [](netudp::Message msg) {
+        /* Receive on server (zero-allocation callback) */
+        server.receive_all(64, [&](netudp::Message msg) {
             std::printf("Server got %d bytes on ch%d from client %d\n",
                         msg.size(), msg.channel(), msg.client());
         });
@@ -87,7 +83,18 @@ int main() {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
-    std::printf("Done. Server stats: %d connected, %.0f pps in\n",
-                server.stats().connected_clients, server.stats().recv_pps);
+    /* Print profiling zones */
+    auto zones = netudp::profiling_get_zones();
+    std::printf("\n=== Profiling (%zu zones) ===\n", zones.size());
+    for (auto& z : zones) {
+        std::printf("  %-30s  calls=%llu  avg=%.0f ns\n",
+                    z.name,
+                    static_cast<unsigned long long>(z.call_count),
+                    z.avg_ns());
+    }
+
+    auto s = server.stats();
+    std::printf("\nServer stats: %d connected, %.0f pps in\n",
+                s.connected_clients, s.recv_pps);
     return 0;
 }
