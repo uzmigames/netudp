@@ -99,7 +99,7 @@ add_library(netudp STATIC
 
 # --- Per-file SIMD compile flags (non-MSVC only, MSVC enables intrinsics by default) ---
 if(NOT MSVC)
-    set_source_files_properties(src/simd/simd_sse42.cpp PROPERTIES COMPILE_FLAGS "-msse4.2 -mpopcnt")
+    set_source_files_properties(src/simd/simd_sse42.cpp PROPERTIES COMPILE_FLAGS "-msse4.2 -mpopcnt -mbmi")
     set_source_files_properties(src/simd/simd_avx2.cpp PROPERTIES COMPILE_FLAGS "-mavx2 -mbmi2")
 endif()
 

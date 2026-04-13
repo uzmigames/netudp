@@ -100,8 +100,7 @@ private:
     };
 
     static AddressKey make_key(const netudp_address_t* addr) {
-        AddressKey key;
-        std::memset(&key, 0, sizeof(key));
+        AddressKey key = {};
         key.bytes[0] = addr->type;
         int data_len = address_data_len(addr);
         std::memcpy(key.bytes + 1, &addr->data, static_cast<size_t>(data_len));

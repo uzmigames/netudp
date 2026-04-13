@@ -192,8 +192,8 @@ public:
         recv_seq = 0;
         oldest_unacked = 0;
         messages_dropped_ = 0;
-        std::memset(sent_buffer_, 0, sizeof(sent_buffer_));
-        std::memset(recv_buffer_, 0, sizeof(recv_buffer_));
+        for (auto& s : sent_buffer_) { s = SentMessage{}; }
+        for (auto& r : recv_buffer_) { r = ReceivedMessage{}; }
     }
 
 private:
