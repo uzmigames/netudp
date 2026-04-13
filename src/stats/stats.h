@@ -52,6 +52,9 @@ struct ConnectionStats {
     uint32_t fragments_retransmitted = 0;
     uint32_t fragments_timed_out = 0;
 
+    /* Coalescing */
+    uint32_t frames_coalesced = 0;
+
     /* Compression */
     float    compression_ratio = 0.0F;
     uint64_t compression_bytes_saved = 0;

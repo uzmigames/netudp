@@ -844,6 +844,7 @@ void server_handle_data_packet(netudp_server* server, int slot,
  * Internal: Send pending channel data
  * ====================================================================== */
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) — coalescing loop with multiple frame types
 void server_send_pending(netudp_server* server, int slot) {
     NETUDP_ZONE("srv::send_pending");
     Connection& conn = server->connections[slot];
@@ -854,85 +855,136 @@ void server_send_pending(netudp_server* server, int slot) {
         return;
     }
 
-    /* Find next channel with pending data */
+    /* Reserve space for MAC (16 bytes) in payload budget */
+    static constexpr int kPayloadBudget = NETUDP_MTU;
+
+    /* Payload buffer: [AckFields 8][frame1][frame2]...[frameN] */
+    uint8_t payload[NETUDP_MTU];
+    int payload_pos = 0;
+    int frames_packed = 0;
+
+    /* Write AckFields once for this coalesced packet */
+    AckFields ack = conn.packet_tracker.build_ack_fields(now);
+    payload_pos += write_ack_fields(ack, payload + payload_pos);
+
+    /* Iterate channels, packing frames until MTU is full or queues are empty */
     int ch_idx = ChannelScheduler::next_channel(conn.cdata->channels, conn.num_channels, now);
     while (ch_idx >= 0) {
+        NETUDP_ZONE("srv::coalesce");
+
         QueuedMessage qmsg;
         if (!conn.ch(ch_idx).dequeue_send(&qmsg)) {
-            break;
+            ch_idx = ChannelScheduler::next_channel(conn.cdata->channels, conn.num_channels, now);
+            continue;
         }
 
-        /* Build packet: prefix + encrypted(AckFields + frame) */
-        uint8_t payload[NETUDP_MTU];
-        int payload_pos = 0;
-
-        /* AckFields */
-        AckFields ack = conn.packet_tracker.build_ack_fields(now);
-        payload_pos += write_ack_fields(ack, payload + payload_pos);
-
-        /* Frame */
+        /* Calculate frame overhead */
         uint8_t ch_type = conn.ch(ch_idx).type();
-        int frame_len = 0;
+        bool is_reliable = (ch_type == NETUDP_CHANNEL_RELIABLE_ORDERED ||
+                            ch_type == NETUDP_CHANNEL_RELIABLE_UNORDERED);
+        int frame_overhead = is_reliable ? 6 : 4;
+        int needed = frame_overhead + qmsg.size;
+        int remaining = kPayloadBudget - payload_pos;
 
-        if (ch_type == NETUDP_CHANNEL_RELIABLE_ORDERED || ch_type == NETUDP_CHANNEL_RELIABLE_UNORDERED) {
+        /* If this frame doesn't fit and we already have frames, flush first */
+        if (needed > remaining && frames_packed > 0) {
+            /* Flush current coalesced packet */
+            conn.packet_tracker.send_packet(now);
+
+            if (crypto::should_rekey(conn.key_epoch, now) && !conn.key_epoch.rekey_pending) {
+                crypto::prepare_rekey(conn.key_epoch);
+            }
+
+            uint8_t prefix = conn.key_epoch.rekey_pending
+                             ? crypto::PACKET_PREFIX_DATA_REKEY
+                             : static_cast<uint8_t>(0x14);
+            uint8_t ct[NETUDP_MAX_PACKET_ON_WIRE];
+            int ct_len = crypto::packet_encrypt(&conn.key_epoch, server->protocol_id, prefix,
+                                                 payload, payload_pos, ct);
+            if (ct_len < 0) {
+                NLOG_ERROR("[netudp] send_pending: encryption failed (slot=%d)", slot);
+                break;
+            }
+
+            if (conn.key_epoch.rekey_pending) {
+                crypto::activate_rekey(conn.key_epoch, now);
+            }
+
+            server->send_buf[0] = prefix;
+            std::memcpy(server->send_buf + 1, ct, static_cast<size_t>(ct_len));
+            int total = 1 + ct_len;
+            socket_send(&server->socket, &conn.address, server->send_buf, total);
+            conn.last_send_time = now;
+            conn.stats.on_packet_sent(total);
+            conn.stats.frames_coalesced += static_cast<uint32_t>(frames_packed);
+            conn.budget.consume(total);
+
+            if (!conn.budget.can_send()) {
+                return;
+            }
+
+            /* Start new packet */
+            payload_pos = 0;
+            ack = conn.packet_tracker.build_ack_fields(now);
+            payload_pos += write_ack_fields(ack, payload + payload_pos);
+            frames_packed = 0;
+            remaining = kPayloadBudget - payload_pos;
+        }
+
+        /* Write frame into payload */
+        int frame_len = 0;
+        if (is_reliable) {
             uint16_t pkt_seq = conn.packet_tracker.send_sequence();
             conn.rs(ch_idx).record_send(qmsg.data, qmsg.size, pkt_seq, now);
             frame_len = wire::write_reliable_frame(
-                payload + payload_pos, NETUDP_MTU - payload_pos,
+                payload + payload_pos, remaining,
                 static_cast<uint8_t>(ch_idx), qmsg.sequence, qmsg.data, qmsg.size);
         } else {
             frame_len = wire::write_unreliable_frame(
-                payload + payload_pos, NETUDP_MTU - payload_pos,
+                payload + payload_pos, remaining,
                 static_cast<uint8_t>(ch_idx), qmsg.data, qmsg.size);
         }
 
         if (frame_len < 0) {
-            NLOG_ERROR("[netudp] send_pending: frame encode failed (slot=%d, channel=%d)", slot, ch_idx);
+            NLOG_ERROR("[netudp] send_pending: frame encode failed (slot=%d, ch=%d)", slot, ch_idx);
             break;
         }
-        payload_pos += frame_len;
 
-        /* Record packet send (return value is the sequence, used for ack matching) */
+        payload_pos += frame_len;
+        frames_packed++;
+
+        ch_idx = ChannelScheduler::next_channel(conn.cdata->channels, conn.num_channels, now);
+    }
+
+    /* Flush remaining frames */
+    if (frames_packed > 0) {
         conn.packet_tracker.send_packet(now);
 
-        /* Rekey detection — trigger on threshold, use old tx_key for REKEY packet */
         if (crypto::should_rekey(conn.key_epoch, now) && !conn.key_epoch.rekey_pending) {
             crypto::prepare_rekey(conn.key_epoch);
         }
 
-        /* Encrypt — uses old tx_key; prefix signals rekey to receiver */
         uint8_t prefix = conn.key_epoch.rekey_pending
                          ? crypto::PACKET_PREFIX_DATA_REKEY
                          : static_cast<uint8_t>(0x14);
         uint8_t ct[NETUDP_MAX_PACKET_ON_WIRE];
         int ct_len = crypto::packet_encrypt(&conn.key_epoch, server->protocol_id, prefix,
                                              payload, payload_pos, ct);
-        if (ct_len < 0) {
-            NLOG_ERROR("[netudp] send_pending: packet encryption failed (slot=%d)", slot);
-            break;
-        }
+        if (ct_len >= 0) {
+            if (conn.key_epoch.rekey_pending) {
+                crypto::activate_rekey(conn.key_epoch, now);
+            }
 
-        /* Switch to new keys AFTER encrypting with old tx_key */
-        if (conn.key_epoch.rekey_pending) {
-            crypto::activate_rekey(conn.key_epoch, now);
-        }
-
-        /* Assemble wire packet */
-        server->send_buf[0] = prefix;
-        std::memcpy(server->send_buf + 1, ct, static_cast<size_t>(ct_len));
-        int total = 1 + ct_len;
-
-        /* Send */
-        socket_send(&server->socket, &conn.address, server->send_buf, total);
-        conn.last_send_time = now;
-        conn.stats.on_packet_sent(total);
-        conn.budget.consume(total);
-
-        /* Next channel */
-        ch_idx = ChannelScheduler::next_channel(conn.cdata->channels, conn.num_channels, now);
-
-        if (!conn.budget.can_send()) {
-            break;
+            server->send_buf[0] = prefix;
+            std::memcpy(server->send_buf + 1, ct, static_cast<size_t>(ct_len));
+            int total = 1 + ct_len;
+            socket_send(&server->socket, &conn.address, server->send_buf, total);
+            conn.last_send_time = now;
+            conn.stats.on_packet_sent(total);
+            conn.stats.frames_coalesced += static_cast<uint32_t>(frames_packed);
+            conn.budget.consume(total);
+        } else {
+            NLOG_ERROR("[netudp] send_pending: final encryption failed (slot=%d)", slot);
         }
     }
 }

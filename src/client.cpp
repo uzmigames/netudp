@@ -383,6 +383,7 @@ void netudp_client_flush(netudp_client_t* client) {
 
 namespace netudp {
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity) — coalescing loop with multiple frame types
 void client_send_pending(netudp_client* client) {
     NETUDP_ZONE("cli::send_pending");
     Connection& conn = client->conn;
@@ -392,64 +393,110 @@ void client_send_pending(netudp_client* client) {
         return;
     }
 
+    static constexpr int kPayloadBudget = NETUDP_MTU;
+
+    uint8_t payload[NETUDP_MTU];
+    int payload_pos = 0;
+    int frames_packed = 0;
+
+    AckFields ack = conn.packet_tracker.build_ack_fields(now);
+    payload_pos += write_ack_fields(ack, payload + payload_pos);
+
+    const netudp_address_t* dest = &client->server_addresses[client->current_server_index];
+
     int ch_idx = ChannelScheduler::next_channel(conn.cdata->channels, conn.num_channels, now);
     while (ch_idx >= 0) {
+        NETUDP_ZONE("cli::coalesce");
+
         QueuedMessage qmsg;
         if (!conn.ch(ch_idx).dequeue_send(&qmsg)) {
-            break;
+            ch_idx = ChannelScheduler::next_channel(conn.cdata->channels, conn.num_channels, now);
+            continue;
         }
 
-        uint8_t payload[NETUDP_MTU];
-        int payload_pos = 0;
-
-        AckFields ack = conn.packet_tracker.build_ack_fields(now);
-        payload_pos += write_ack_fields(ack, payload + payload_pos);
-
         uint8_t ch_type = conn.ch(ch_idx).type();
-        int frame_len = 0;
+        bool is_reliable = (ch_type == NETUDP_CHANNEL_RELIABLE_ORDERED ||
+                            ch_type == NETUDP_CHANNEL_RELIABLE_UNORDERED);
+        int frame_overhead = is_reliable ? 6 : 4;
+        int needed = frame_overhead + qmsg.size;
+        int remaining = kPayloadBudget - payload_pos;
 
-        if (ch_type == NETUDP_CHANNEL_RELIABLE_ORDERED || ch_type == NETUDP_CHANNEL_RELIABLE_UNORDERED) {
+        /* Flush if this frame doesn't fit and we already have frames */
+        if (needed > remaining && frames_packed > 0) {
+            conn.packet_tracker.send_packet(now);
+
+            uint8_t prefix = 0x14;
+            uint8_t ct[NETUDP_MAX_PACKET_ON_WIRE];
+            int ct_len = crypto::packet_encrypt(&conn.key_epoch, client->protocol_id, prefix,
+                                                 payload, payload_pos, ct);
+            if (ct_len < 0) {
+                NLOG_ERROR("[netudp] cli::send_pending: encryption failed");
+                break;
+            }
+
+            client->send_buf[0] = prefix;
+            std::memcpy(client->send_buf + 1, ct, static_cast<size_t>(ct_len));
+            int total = 1 + ct_len;
+            socket_send(&client->socket, dest, client->send_buf, total);
+            conn.last_send_time = now;
+            conn.stats.on_packet_sent(total);
+            conn.stats.frames_coalesced += static_cast<uint32_t>(frames_packed);
+            conn.budget.consume(total);
+
+            if (!conn.budget.can_send()) {
+                return;
+            }
+
+            payload_pos = 0;
+            ack = conn.packet_tracker.build_ack_fields(now);
+            payload_pos += write_ack_fields(ack, payload + payload_pos);
+            frames_packed = 0;
+            remaining = kPayloadBudget - payload_pos;
+        }
+
+        int frame_len = 0;
+        if (is_reliable) {
             uint16_t pkt_seq = conn.packet_tracker.send_sequence();
             conn.rs(ch_idx).record_send(qmsg.data, qmsg.size, pkt_seq, now);
             frame_len = wire::write_reliable_frame(
-                payload + payload_pos, NETUDP_MTU - payload_pos,
+                payload + payload_pos, remaining,
                 static_cast<uint8_t>(ch_idx), qmsg.sequence, qmsg.data, qmsg.size);
         } else {
             frame_len = wire::write_unreliable_frame(
-                payload + payload_pos, NETUDP_MTU - payload_pos,
+                payload + payload_pos, remaining,
                 static_cast<uint8_t>(ch_idx), qmsg.data, qmsg.size);
         }
 
         if (frame_len < 0) {
-            NLOG_ERROR("[netudp] cli::send_pending: frame encode failed (channel=%d)", ch_idx);
+            NLOG_ERROR("[netudp] cli::send_pending: frame encode failed (ch=%d)", ch_idx);
             break;
         }
-        payload_pos += frame_len;
 
+        payload_pos += frame_len;
+        frames_packed++;
+
+        ch_idx = ChannelScheduler::next_channel(conn.cdata->channels, conn.num_channels, now);
+    }
+
+    /* Flush remaining frames */
+    if (frames_packed > 0) {
         conn.packet_tracker.send_packet(now);
 
         uint8_t prefix = 0x14;
         uint8_t ct[NETUDP_MAX_PACKET_ON_WIRE];
         int ct_len = crypto::packet_encrypt(&conn.key_epoch, client->protocol_id, prefix,
                                              payload, payload_pos, ct);
-        if (ct_len < 0) {
-            NLOG_ERROR("[netudp] cli::send_pending: packet encryption failed");
-            break;
-        }
-
-        client->send_buf[0] = prefix;
-        std::memcpy(client->send_buf + 1, ct, static_cast<size_t>(ct_len));
-        int total = 1 + ct_len;
-
-        const netudp_address_t* dest = &client->server_addresses[client->current_server_index];
-        socket_send(&client->socket, dest, client->send_buf, total);
-        conn.last_send_time = now;
-        conn.stats.on_packet_sent(total);
-        conn.budget.consume(total);
-
-        ch_idx = ChannelScheduler::next_channel(conn.cdata->channels, conn.num_channels, now);
-        if (!conn.budget.can_send()) {
-            break;
+        if (ct_len >= 0) {
+            client->send_buf[0] = prefix;
+            std::memcpy(client->send_buf + 1, ct, static_cast<size_t>(ct_len));
+            int total = 1 + ct_len;
+            socket_send(&client->socket, dest, client->send_buf, total);
+            conn.last_send_time = now;
+            conn.stats.on_packet_sent(total);
+            conn.stats.frames_coalesced += static_cast<uint32_t>(frames_packed);
+            conn.budget.consume(total);
+        } else {
+            NLOG_ERROR("[netudp] cli::send_pending: final encryption failed");
         }
     }
 }
