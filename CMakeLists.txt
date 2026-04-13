@@ -194,7 +194,8 @@ if(NETUDP_HAS_NETC)
     target_include_directories(netudp PRIVATE ${netc_SOURCE_DIR}/include)
 
     # Fix: Zig CC needs -mxsave for __builtin_ia32_xgetbv in netc SIMD detection
-    if(NOT MSVC AND TARGET netc)
+    # Only apply on x86/x64 — ARM64 (Apple Silicon) does not support this flag
+    if(NOT MSVC AND TARGET netc AND (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|i[3-6]86"))
         set_source_files_properties(
             ${netc_SOURCE_DIR}/src/simd/netc_simd_generic.c
             TARGET_DIRECTORY netc
