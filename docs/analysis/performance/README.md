@@ -19,3 +19,4 @@ Competitive analysis, bottleneck identification, and optimization roadmap for ne
 | 08 | [Game Server Scenarios](08-game-server-scenarios.md) | PPS budgets for FPS, Battle Royale, MMO, high-density sim |
 | 09 | [Sources](09-sources.md) | All external references with URLs |
 | 10 | [Windows Parity](10-windows-parity.md) | RIO backend, WFP tuning, Windows vs Linux gap analysis |
+| 11 | [Server Bottlenecks](11-server-bottlenecks.md) | O(N) dispatch, single-thread pipeline, active list, fingerprint hash |
