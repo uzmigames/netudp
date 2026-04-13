@@ -266,6 +266,7 @@ static void pipeline_send_thread(netudp_server* server) {
 static void server_send_packet(netudp_server* server,
                                 const netudp_address_t* dest,
                                 const uint8_t* data, int len) {
+    NETUDP_ZONE("srv::send_pkt");
     if (server->pipeline_mode && server->send_queue != nullptr) {
         server->send_queue->push(dest, data, len);
     } else {
@@ -912,24 +913,27 @@ void netudp_message_release(netudp_message_t* message) {
 
 void netudp_server_broadcast(netudp_server_t* server, int channel,
                              const void* data, int bytes, int flags) {
+    NETUDP_ZONE("srv::broadcast");
     if (server == nullptr || !server->running) {
         return;
     }
-    for (int i = 0; i < server->max_clients; ++i) {
-        if (server->connections[i].active) {
-            netudp_server_send(server, i, channel, data, bytes, flags);
-        }
+    /* Iterate active connections only — O(active) not O(max_clients) */
+    for (int a = 0; a < server->active_count; ++a) {
+        int slot = server->active_slots[a];
+        netudp_server_send(server, slot, channel, data, bytes, flags);
     }
 }
 
 void netudp_server_broadcast_except(netudp_server_t* server, int except_client,
                                     int channel, const void* data, int bytes, int flags) {
+    NETUDP_ZONE("srv::broadcast_except");
     if (server == nullptr || !server->running) {
         return;
     }
-    for (int i = 0; i < server->max_clients; ++i) {
-        if (i != except_client && server->connections[i].active) {
-            netudp_server_send(server, i, channel, data, bytes, flags);
+    for (int a = 0; a < server->active_count; ++a) {
+        int slot = server->active_slots[a];
+        if (slot != except_client) {
+            netudp_server_send(server, slot, channel, data, bytes, flags);
         }
     }
 }
