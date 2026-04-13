@@ -34,10 +34,28 @@
 #include <climits>
 
 /* ======================================================================
+ * Disabled mode — compile out all profiling (zero overhead)
+ * ====================================================================== */
+
+#ifdef NETUDP_DISABLE_PROFILING
+
+#include <netudp/netudp_profiling.h>
+
+#define NETUDP_ZONE(name)        ((void)0)
+#define NETUDP_COUNTER(name, v)  ((void)0)
+
+namespace netudp {
+    inline void  profiler_enable(int)     {}
+    inline int   profiler_is_enabled()    { return 0; }
+    inline int   profiler_get_zones(netudp_profile_zone_t*, int) { return 0; }
+    inline void  profiler_reset()         {}
+}
+
+/* ======================================================================
  * Tracy mode
  * ====================================================================== */
 
-#ifdef NETUDP_ENABLE_TRACY
+#elif defined(NETUDP_ENABLE_TRACY)
 #include <tracy/Tracy.hpp>
 
 #define NETUDP_ZONE(name)        ZoneScopedN(name)
@@ -164,6 +182,6 @@ void profiler_reset();
 /** Emit a named counter value (no-op in built-in mode — use zone stats). */
 #define NETUDP_COUNTER(name, v) (void)(v)
 
-#endif /* NETUDP_ENABLE_TRACY */
+#endif /* NETUDP_DISABLE_PROFILING / NETUDP_ENABLE_TRACY / built-in */
 
 #endif /* NETUDP_PROFILING_PROFILER_H */

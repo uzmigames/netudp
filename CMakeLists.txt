@@ -20,6 +20,7 @@ option(NETUDP_ENABLE_AVX512 "Enable AVX-512 SIMD (experimental)" OFF)
 option(NETUDP_CRC32_ONLY "CRC32C-only mode for LAN/dev (no AEAD encryption)" OFF)
 option(NETUDP_DISABLE_NETC "Disable netc compression (not recommended)" OFF)
 option(NETUDP_ENABLE_TRACY "Integrate Tracy profiler (requires network access)" OFF)
+option(NETUDP_DISABLE_PROFILING "Compile out built-in profiler (zero overhead)" OFF)
 
 # --- Tracy profiler (optional) ---
 if(NETUDP_ENABLE_TRACY)
@@ -94,6 +95,7 @@ target_compile_definitions(netudp PRIVATE
     $<$<BOOL:${NETUDP_ENABLE_AVX512}>:NETUDP_ENABLE_AVX512=1>
     $<$<BOOL:${NETUDP_HAS_NETC}>:NETUDP_HAS_NETC=1>
     $<$<BOOL:${NETUDP_HAS_TRACY}>:NETUDP_ENABLE_TRACY=1>
+    $<$<BOOL:${NETUDP_DISABLE_PROFILING}>:NETUDP_DISABLE_PROFILING=1>
     $<$<BOOL:${WIN32}>:NOMINMAX>
     $<$<BOOL:${WIN32}>:_CRT_SECURE_NO_WARNINGS>
 )
