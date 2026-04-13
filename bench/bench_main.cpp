@@ -25,6 +25,7 @@ void register_simd_bench(BenchRegistry& reg);
 void register_scalability_bench(BenchRegistry& reg);
 void register_memory_bench(BenchRegistry& reg);
 void register_coalescing_bench(BenchRegistry& reg);
+void register_throughput_bench(BenchRegistry& reg);
 
 /* -----------------------------------------------------------------------
  * BenchRegistry implementation
@@ -228,6 +229,7 @@ int main(int argc, char** argv) {
     register_scalability_bench(reg);
     register_memory_bench(reg);
     register_coalescing_bench(reg);
+    register_throughput_bench(reg);
 
     int rc = reg.run(filter, cfg, json_out);
 

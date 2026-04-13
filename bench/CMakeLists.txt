@@ -6,6 +6,7 @@ add_executable(netudp_bench
     bench_scalability.cpp
     bench_memory.cpp
     bench_coalescing.cpp
+    bench_throughput.cpp
 )
 
 target_include_directories(netudp_bench PRIVATE
