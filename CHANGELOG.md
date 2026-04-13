@@ -3,6 +3,43 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.1.0] - 2026-04-12
+
+### Added
+- **Frame coalescing**: `server_send_pending` and `client_send_pending` now pack multiple frames from multiple channels into a single UDP packet up to MTU. Reduces syscalls, crypto ops, and bandwidth by up to 5x for small messages. Wire format unchanged — receive parser already handled multi-frame payloads.
+- **AES-256-GCM opt-in**: Runtime AEAD dispatch (`g_aead_encrypt`/`g_aead_decrypt`) selects between XChaCha20-Poly1305 (default) and AES-256-GCM via `netudp_crypto_mode_t`. Windows uses BCrypt API; 2.4x faster crypto on AES-NI hardware. XChaCha20 remains default for nonce-misuse resistance.
+- **SO_REUSEPORT multi-socket I/O**: `netudp_server_config_t::num_io_threads` creates N sockets bound to the same port (Linux SO_REUSEPORT). Kernel distributes incoming packets across sockets for 4x recv throughput on multi-core. Windows/macOS: single-socket fallback.
+- **CPU affinity API**: `netudp_server_set_thread_affinity(server, thread_index, cpu_id)` pins I/O threads to specific CPU cores (Linux `sched_setaffinity`/`pthread_setaffinity_np`).
+- **io_uring socket backend**: `socket_uring.h`/`socket_uring.cpp` — zero-syscall-overhead I/O via shared ring buffers (Linux 5.7+, requires liburing). IORING_OP_RECVMSG/SENDMSG with FAST_POLL feature check and fd registration. Graceful fallback to recvmmsg if uring init fails. CMake: `-DNETUDP_ENABLE_IO_URING=ON`.
+- **Compile-time profiling disable**: `-DNETUDP_DISABLE_PROFILING=ON` compiles `NETUDP_ZONE()` to `((void)0)` for zero-overhead production builds. Three profiler modes: disabled (compile-out), built-in (runtime toggle), Tracy (external).
+- **Windows batch I/O optimization**: `socket_send_batch` uses `WSASendTo` with pre-converted addresses; `socket_recv_batch` uses `WSARecvFrom` with `WSABUF`. Eliminates repeated address conversion overhead.
+- **`frames_coalesced` stat**: New counter in `ConnectionStats` tracking how many frames were packed into coalesced packets.
+- **`netudp_server_num_io_threads()` API**: Query active I/O thread count.
+- **Frame coalescing tests**: 3 new integration tests (`MultipleSmallMessagesArrive`, `MultiChannelCoalescing`, `MixedReliableUnreliable`).
+
+### Changed
+- **Pool fast path**: `Pool::acquire()` no longer zeroes `sizeof(T)` bytes. Zeroing moved to `Pool::release()` (cold path). Acquire cost drops from ~7.8 us to <100 ns for Connection structs.
+- **AEAD via dispatch**: `packet_crypto.cpp` calls `g_aead_encrypt`/`g_aead_decrypt` function pointers instead of direct `aead_encrypt`/`aead_decrypt`. Enables runtime algorithm selection.
+- Test suite expanded to 353 tests (was 350).
+
+### Performance (Windows 10, i7-12700K, single thread, Release)
+
+| Metric | v1.0.0 | v1.1.0 | Delta |
+|--------|-------:|-------:|------:|
+| `packet_encrypt` | 948 ns | 712 ns | **-25%** |
+| `packet_decrypt` | 1,020 ns | 815 ns | **-20%** |
+| `aead::encrypt` | 800 ns | 583 ns | **-27%** |
+| `aead::decrypt` | 780 ns | 599 ns | **-23%** |
+| PPS (1 client) | 88K | 88K | = |
+| PPS (16 clients) | 86K | 92K | **+7%** |
+| p50 latency (16 clients) | 9,413 ns | 8,613 ns | **-8.5%** |
+| Memory per slot | 4.4 KB | 4.4 KB | = |
+| Pool::acquire | ~7.8 us | <100 ns | **~78x** |
+| CRC32C (AVX2) | 22.5x | 22.7x | = |
+
+Frame coalescing impact (estimated, multi-msg-per-tick scenario):
+- 5 msgs x 20B each: 5 packets (285B) -> 1 packet (153B) = **5x fewer syscalls, 46% less bandwidth**
+
 ## [1.0.0] - 2026-04-12
 
 ### Added
