@@ -18,3 +18,4 @@ Competitive analysis, bottleneck identification, and optimization roadmap for ne
 | 07 | [Optimization Roadmap](07-optimization-roadmap.md) | Phases A–G with implementation plans, expected gains, risks |
 | 08 | [Game Server Scenarios](08-game-server-scenarios.md) | PPS budgets for FPS, Battle Royale, MMO, high-density sim |
 | 09 | [Sources](09-sources.md) | All external references with URLs |
+| 10 | [Windows Parity](10-windows-parity.md) | RIO backend, WFP tuning, Windows vs Linux gap analysis |
