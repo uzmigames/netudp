@@ -21,6 +21,22 @@ option(NETUDP_CRC32_ONLY "CRC32C-only mode for LAN/dev (no AEAD encryption)" OFF
 option(NETUDP_DISABLE_NETC "Disable netc compression (not recommended)" OFF)
 option(NETUDP_ENABLE_TRACY "Integrate Tracy profiler (requires network access)" OFF)
 option(NETUDP_DISABLE_PROFILING "Compile out built-in profiler (zero overhead)" OFF)
+option(NETUDP_ENABLE_IO_URING "Enable io_uring socket backend (Linux 5.7+)" OFF)
+
+# --- io_uring detection (Linux only) ---
+if(NETUDP_ENABLE_IO_URING AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_library(LIBURING_LIB uring)
+    find_path(LIBURING_INCLUDE liburing.h)
+    if(LIBURING_LIB AND LIBURING_INCLUDE)
+        set(NETUDP_HAS_IO_URING TRUE)
+        message(STATUS "io_uring: found (${LIBURING_LIB})")
+    else()
+        message(WARNING "io_uring: liburing not found, falling back to recvmmsg/sendmmsg")
+        set(NETUDP_HAS_IO_URING FALSE)
+    endif()
+else()
+    set(NETUDP_HAS_IO_URING FALSE)
+endif()
 
 # --- Tracy profiler (optional) ---
 if(NETUDP_ENABLE_TRACY)
@@ -62,6 +78,7 @@ add_library(netudp STATIC
     src/core/address.cpp
     src/connection/connect_token.cpp
     src/socket/socket.cpp
+    src/socket/socket_uring.cpp
     src/crypto/vendor/monocypher.c
     src/crypto/aead.cpp
     src/crypto/xchacha.cpp
@@ -96,6 +113,7 @@ target_compile_definitions(netudp PRIVATE
     $<$<BOOL:${NETUDP_HAS_NETC}>:NETUDP_HAS_NETC=1>
     $<$<BOOL:${NETUDP_HAS_TRACY}>:NETUDP_ENABLE_TRACY=1>
     $<$<BOOL:${NETUDP_DISABLE_PROFILING}>:NETUDP_DISABLE_PROFILING=1>
+    $<$<BOOL:${NETUDP_HAS_IO_URING}>:NETUDP_HAS_IO_URING=1>
     $<$<BOOL:${WIN32}>:NOMINMAX>
     $<$<BOOL:${WIN32}>:_CRT_SECURE_NO_WARNINGS>
 )
@@ -103,6 +121,12 @@ target_compile_definitions(netudp PRIVATE
 # Platform-specific link libraries
 if(WIN32)
     target_link_libraries(netudp PRIVATE ws2_32 bcrypt)
+endif()
+
+# io_uring link
+if(NETUDP_HAS_IO_URING)
+    target_include_directories(netudp PRIVATE ${LIBURING_INCLUDE})
+    target_link_libraries(netudp PRIVATE ${LIBURING_LIB})
 endif()
 
 # Tracy link
