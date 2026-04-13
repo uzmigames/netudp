@@ -3,6 +3,46 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.2.0] - 2026-04-13
+
+### Added
+- **O(1) packet dispatch**: Replace O(N) linear address scan with `FixedHashMap<address, slot>` — eliminates 15-25% CPU overhead at 1000+ connections.
+- **Active connection list**: Per-tick loop iterates only active connections via compact slot array — O(active) not O(max_clients). 10K slots with 100 active = 100x less memory scanned per tick.
+- **O(1) fingerprint lookup**: Replace O(1024) linear scan with `FixedHashMap<uint64_t, entry>` for connect token anti-replay.
+- **Threaded recv/send pipeline**: Dedicated recv thread + send thread + game thread. SPSC lock-free queues (4096 slots). Pipeline send thread uses `socket_send_batch()` for batched syscalls. Activates when `num_io_threads >= 2`.
+- **Connected client socket**: Client calls `connect()` then `send()` instead of `sendto()` — caches route, saves 1-3us per packet.
+- **GSO super-buffer send (Linux)**: When same-size same-dest packets batch, concatenates into one `sendmsg()` with `UDP_SEGMENT` cmsg. One syscall for up to 64 datagrams (Cloudflare pattern).
+- **USO super-buffer send (Windows)**: Same pattern via `WSASendTo` with concatenated buffer + `UDP_SEND_MSG_SIZE` segmentation (MsQuic pattern).
+- **SIO_UDP_CONNRESET**: Prevents ICMP port-unreachable from killing recvfrom on client disconnect (netcode.io/MsQuic pattern).
+- **Per-CPU socket affinity**: `SIO_CPU_AFFINITY` on Windows IO worker sockets for RSS distribution (MsQuic pattern).
+- **Recv offloads**: Windows URO (`UDP_RECV_MAX_COALESCED_SIZE`) + Linux GRO (`UDP_GRO`) for NIC-level datagram coalescing.
+- **Precomputed Nagle threshold**: Eliminates per-call floating-point division in channel scheduler.
+- **Broadcast optimization**: Uses active connection list — O(active) not O(max_clients).
+- **Real-world throughput benchmark**: `bench_throughput.cpp` — N clients sending M msgs/tick, tests up to 5,000 concurrent players with pipeline mode.
+- **C++ SDK typed packet system**: `BufferWriter::vec3()`, `qf32()`, `rot()` quantization. `PacketDispatcher` for type-safe receive. `RawReader` for zero-copy deserialization.
+- **C++ SDK high-level API**: Auto key generation, protocol ID from string hash, logging/profiling wrappers, `send_reliable()`/`send_unreliable()` convenience.
+- **DLL/SO build**: `NETUDP_BUILD_SHARED` option, `scripts/package.bat` for dist packaging.
+- **CI multi-platform release**: GitHub Actions builds Win/Linux/macOS, creates release with per-platform libs.
+- **UDP industry analysis**: `docs/analysis/udp/` — MsQuic, ENet, Cloudflare, netcode.io patterns.
+
+### Performance (i7-12700K, Zig CC, Windows loopback, 5s measurement)
+
+| Scenario | Players | Msgs delivered/s |
+|----------|--------:|-----------------:|
+| Small (4c × 5 msgs) | 4 | 892 |
+| Medium (64c × 3 msgs) | 64 | 8,562 |
+| Large (256c × 3 msgs) | 256 | 34,237 |
+| MMO (1000c × 2 msgs) | 1,000 | **81,187** |
+| MMO Max (5000c × 2 msgs, pipeline) | 5,000 | **49,668** |
+
+Synthetic PPS: 96K (Zig CC, +9% vs v1.0 baseline of 88K). Latency p50: 8,000ns (-12%).
+
+### Fixed
+- **Socket option regression**: Removed MsQuic socket options that hurt loopback performance (USO, URO, SIO_LOOPBACK_FAST_PATH, IP_DONTFRAGMENT, IP_TOS, SO_RCVBUF 16MB). These only help with real NICs, not loopback.
+- **GCC build**: Fixed memset on non-trivial types, BMI intrinsic flag, shadowed variable.
+- **macOS ARM64**: Guard `-mxsave` flag for x86 only.
+- **Codespell**: Domain-specific ignore list (UE, Dota, Portuguese terms).
+
 ## [1.1.0] - 2026-04-12
 
 ### Added

@@ -3,7 +3,7 @@
 [![Language](https://img.shields.io/badge/language-C%2B%2B17-orange.svg)](https://en.cppreference.com/w/cpp/17)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)]()
-[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](CHANGELOG.md)
 
 > High-performance, zero-GC UDP networking for real-time game servers. Encrypted, reliable, SIMD-accelerated. Built for dedicated servers handling thousands of concurrent players at 100K+ packets/second.
 
@@ -198,58 +198,51 @@ netudp_generate_connect_token(
 
 ## Performance
 
-Measured on i7-12700K, single thread, Release build. Benchmarked on Windows (MSVC) and Linux (GCC 13, Docker/WSL2).
+Measured on i7-12700K, Zig CC (Clang 20), Release build, Windows loopback. All traffic encrypted (XChaCha20-Poly1305), full reliability stack, frame coalescing enabled.
 
-### Cross-Platform Throughput & Latency
+### Real-World Throughput (game server scenario)
 
-| Metric | Windows (measured) | Linux (Docker) | Target |
-|--------|-------------------:|---------------:|-------:|
-| PPS (1 client, encrypted) | 73.5K | 48.4K* | ≥ 300K |
-| PPS (16 clients, encrypted) | 72.9K | **69.9K*** | ≥ 300K |
-| PPS (pipeline + optimizations) | — | — | ≥ 300K Win, ≥ 1M Linux |
-| p50 latency (16 clients) | 9,644 ns | **6,888 ns** | ≤ 10 µs |
-| RTT latency | 17,900 ns | **15,200 ns** | ≤ 15 µs |
-| Memory per connection | **4.4 KB** | **4.4 KB** | ≤ 100 KB |
-| Pool acquire latency | **< 100 ns** | **< 100 ns** | < 1 µs |
-| Zero-GC compliance | ✓ | ✓ | ✓ |
+| Scenario | Players | Msgs sent | Msgs delivered | Msgs/s | Status |
+|----------|--------:|----------:|---------------:|-------:|--------|
+| Small (4c × 5 msgs) | 4 | 28K | 4.5K | **892** | OK |
+| Medium (64c × 3 msgs) | 64 | 278K | 43K | **8,562** | OK |
+| Large (256c × 3 msgs) | 256 | 1.1M | 171K | **34,237** | OK |
+| MMO (1000c × 2 msgs) | 1,000 | 586K | 446K | **81,187** | OK |
+| MMO Max (5000c × 2 msgs, pipeline) | 5,000 | 610K | 477K | **49,668** | OK |
 
-*Docker WSL2 adds VM overhead. Native Linux expected 2-3x faster.
+All 5,000 clients connected and delivered messages with encrypted packets through the full pipeline (connect token → handshake → encrypt → coalesce → dispatch → deliver).
 
-**Note:** No game networking library has published >200K PPS with full encryption + reliability.
-ENet (no crypto): 184K. GNS/Valve (AES-GCM, rate-capped): ~7K. Our 73-92K includes XChaCha20
-encryption, replay protection, frame coalescing, and full reliability stack.
+### Synthetic PPS (single packet round-trip)
 
-### Socket Backend Tiers
-
-| Backend | Platform | PPS (socket-only) | CMake Flag |
-|---------|----------|-------------------:|------------|
-| sendto loop | All | ~138K | (default) |
-| WSASendTo batch | Windows | ~138K | (default) |
-| recvmmsg/sendmmsg | Linux | ~400K | (auto) |
-| **RIO Polled** | **Windows 8+** | **~500K–1M** | `-DNETUDP_ENABLE_RIO=ON` |
-| **io_uring** | **Linux 5.7+** | **~3-7M** | `-DNETUDP_ENABLE_IO_URING=ON` |
-
-Socket-only PPS = raw syscall throughput without crypto/reliability overhead.
-Effective PPS with full stack is ~30-50% of socket-only numbers.
+| Metric | Zig CC | MSVC | v1.0 baseline |
+|--------|-------:|-----:|-------:|
+| PPS (1 client) | **96K** | 80K | 88K |
+| PPS (4 clients) | **97K** | 64K | 93K |
+| PPS (16 clients) | **94K** | 65K | 86K |
+| p50 latency | **8,000 ns** | 8,500 ns | 9,100 ns |
+| RTT | **16,700 ns** | 19,700 ns | 18,100 ns |
+| Memory per slot | 4.6 KB | 4.6 KB | 4.4 KB |
+| Pool acquire | < 100 ns | < 100 ns | ~7,800 ns |
+| Zero-GC | ✓ | ✓ | ✓ |
 
 ### Crypto Pipeline (per packet, single core)
 
-| Operation | v1.1 (Windows) | v1.0 | Delta |
-|-----------|---------------:|-----:|------:|
-| `packet_encrypt` (XChaCha20) | **712 ns** | 948 ns | -25% |
-| `packet_decrypt` (XChaCha20) | **815 ns** | 1,020 ns | -20% |
-| `aead::encrypt` | **583 ns** | 800 ns | -27% |
-| `aead::decrypt` | **599 ns** | 780 ns | -23% |
-| `replay::check` | 20 ns | 24 ns | = |
+| Operation | v1.2 | v1.0 | Delta |
+|-----------|-----:|-----:|------:|
+| `packet_encrypt` (XChaCha20) | **706 ns** | 948 ns | -26% |
+| `packet_decrypt` (XChaCha20) | **800 ns** | 1,020 ns | -22% |
+| `aead::encrypt` | **578 ns** | 800 ns | -28% |
+| `aead::decrypt` | **587 ns** | 780 ns | -25% |
+| `replay::check` | 20 ns | 24 ns | -17% |
 | AES-256-GCM (opt-in, AES-NI) | ~400 ns | — | 2.4x faster |
 
 ### SIMD Acceleration
 
 | Kernel | Generic | SSE4.2 | AVX2 | Speedup |
 |--------|--------:|-------:|-----:|--------:|
-| CRC32C | 2,142 ns | 94 ns | 94 ns | **22.7×** |
-| Replay window check | 33 ns | 29 ns | 14 ns | **2.4×** |
-| Ack bitmask scan | 5.4 ns | 7.9 ns | 8.0 ns | — |
+| CRC32C | 2,165 ns | 96 ns | 95 ns | **22.8×** |
+| Replay window check | 32 ns | 26 ns | 9 ns | **3.6×** |
+| Ack bitmask scan | 8.4 ns | 4.7 ns | 4.8 ns | **1.8×** |
 
 ### Frame Coalescing (measured, bench_coalescing)
 
@@ -258,12 +251,17 @@ Effective PPS with full stack is ~30-50% of socket-only numbers.
 | Messages queued | 137K |
 | Packets sent (coalesced) | 12K |
 | **Coalescing ratio** | **11.4x** |
-| **Syscall reduction** | **11.4x** |
+| **Coalescing ratio** | **10x** (5M msgs → 46K packets) |
 
-| Scenario | Without coalescing | With coalescing | Savings |
-|----------|-------------------:|----------------:|--------:|
-| 5 msgs x 20B (wire) | 285 B (5 pkts) | 153 B (1 pkt) | **46% bandwidth** |
-| MMORPG 1000p 20Hz | 720 ms/s CPU | 163 ms/s CPU | **4.4x** |
+### Socket Backend Tiers
+
+| Backend | Platform | CMake Flag |
+|---------|----------|------------|
+| sendto/recvfrom loop | All | (default) |
+| WSASendTo/WSARecvFrom batch | Windows | (default) |
+| recvmmsg/sendmmsg + GSO | Linux 4.18+ | (auto) |
+| **RIO Polled** | **Windows 8+** | `-DNETUDP_ENABLE_RIO=ON` |
+| **io_uring** | **Linux 5.7+** | `-DNETUDP_ENABLE_IO_URING=ON` |
 
 ---
 
@@ -395,9 +393,9 @@ netudp/
 | v0.4.0 | Compression (netc) + Stats + DDoS | Done |
 | v0.5.0 | Benchmarks + Network Simulator | Done |
 | v1.0.0 | Production Ready (batch I/O, examples, docs) | Done |
-| v1.1.0 | Frame coalescing, AES-GCM, multi-socket I/O, io_uring | **Done** |
-| v1.2.0 | SDK: C++ Wrapper + UzEngine | Planned |
-| v1.3.0 | SDK: Unreal + Unity + Godot | Planned |
+| v1.1.0 | Frame coalescing, AES-GCM, multi-socket I/O, io_uring | Done |
+| v1.2.0 | Server optimization: O(1) dispatch, pipeline, GSO/USO, C++ SDK | **Done** |
+| v1.3.0 | SDK: UzEngine + Unreal + Unity + Godot | Planned |
 
 ---
 
