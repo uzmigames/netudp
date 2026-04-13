@@ -114,6 +114,9 @@ int socket_create(Socket* out, const netudp_address_t* bind_addr,
 #ifdef NETUDP_PLATFORM_WINDOWS
     /* UDP_SEND_MSG_SIZE (Windows 10 1703+) — enables kernel-level UDP segmentation
      * offload for coalesced sends. Ignored silently if not supported. */
+#ifndef UDP_SEND_MSG_SIZE
+#define UDP_SEND_MSG_SIZE 2
+#endif
     DWORD udp_send_msg_size = NETUDP_MTU;
     setsockopt(sock, IPPROTO_UDP, UDP_SEND_MSG_SIZE,
                reinterpret_cast<const char*>(&udp_send_msg_size), sizeof(udp_send_msg_size));

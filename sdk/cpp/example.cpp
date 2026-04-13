@@ -2,7 +2,7 @@
  * @file example.cpp
  * @brief C++ SDK usage example — echo server + client in one file.
  *
- * Build: g++ -std=c++17 -I../../include -I. example.cpp -L../../build -lnetudp -o example
+ * Build: zig c++ -std=c++17 -I../../include -I. example.cpp -L../../build -lnetudp -o example
  */
 
 #include "netudp.hpp"

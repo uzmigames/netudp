@@ -34,12 +34,12 @@ echo === Configure (debug, Zig CC) ===
 cmake --preset debug
 if errorlevel 1 exit /b 1
 echo === Build ===
-cmake --build build-debug -j 4
+cmake --build build\debug -j 4
 if errorlevel 1 exit /b 1
 echo === Test ===
-ctest --test-dir build-debug --output-on-failure
+ctest --test-dir build\debug --output-on-failure
 if errorlevel 1 exit /b 1
-echo === Done: build-debug\libnetudp.a ===
+echo === Done: build\debug\libnetudp.a ===
 goto :eof
 
 :release
@@ -47,12 +47,12 @@ echo === Configure (release, Zig CC) ===
 cmake --preset release
 if errorlevel 1 exit /b 1
 echo === Build ===
-cmake --build build-release -j 4
+cmake --build build\release -j 4
 if errorlevel 1 exit /b 1
 echo === Test ===
-ctest --test-dir build-release --output-on-failure
+ctest --test-dir build\release --output-on-failure
 if errorlevel 1 exit /b 1
-echo === Done: build-release\libnetudp.a ===
+echo === Done: build\release\libnetudp.a ===
 goto :eof
 
 :bench
@@ -60,23 +60,26 @@ echo === Configure (release + bench, Zig CC) ===
 cmake --preset release
 if errorlevel 1 exit /b 1
 echo === Build ===
-cmake --build build-release -j 4
+cmake --build build\release -j 4
 if errorlevel 1 exit /b 1
 echo === Benchmarks ===
-if exist build-release\bench\bench_pps.exe (
-    build-release\bench\bench_pps.exe
+if exist build\release\bench\netudp_bench.exe (
+    build\release\bench\netudp_bench.exe
+) else if exist build\release\bench\netudp_bench (
+    build\release\bench\netudp_bench
 ) else (
-    echo No benchmarks found (bench/ targets not yet implemented)
+    echo No benchmark executable found. Check build output.
+    exit /b 1
 )
 goto :eof
 
 :test
-if exist build-debug (
+if exist build\debug (
     echo === Test (debug) ===
-    ctest --test-dir build-debug --output-on-failure
-) else if exist build-release (
+    ctest --test-dir build\debug --output-on-failure
+) else if exist build\release (
     echo === Test (release) ===
-    ctest --test-dir build-release --output-on-failure
+    ctest --test-dir build\release --output-on-failure
 ) else (
     echo No build directory found. Run: scripts\build.bat debug
     exit /b 1
@@ -88,9 +91,9 @@ echo === Configure (cross-linux, Zig CC) ===
 cmake --preset cross-linux
 if errorlevel 1 exit /b 1
 echo === Build ===
-cmake --build build-linux -j 4
+cmake --build build\linux -j 4
 if errorlevel 1 exit /b 1
-echo === Done: build-linux\libnetudp.a (ELF) ===
+echo === Done: build\linux\libnetudp.a (ELF) ===
 goto :eof
 
 :msvc
@@ -98,21 +101,21 @@ echo === Configure (MSVC, no Zig) ===
 cmake --preset msvc
 if errorlevel 1 exit /b 1
 echo === Build ===
-cmake --build build-msvc --config Debug -j 4
+cmake --build build\msvc --config Debug -j 4
 if errorlevel 1 exit /b 1
 echo === Test ===
-ctest --test-dir build-msvc -C Debug --output-on-failure
+ctest --test-dir build\msvc -C Debug --output-on-failure
 if errorlevel 1 exit /b 1
-echo === Done: build-msvc\Debug\netudp.lib ===
+echo === Done: build\msvc\Debug\netudp.lib ===
 goto :eof
 
 :clean
 echo === Cleaning all build directories ===
-if exist build-debug rmdir /s /q build-debug
-if exist build-release rmdir /s /q build-release
-if exist build-reldbg rmdir /s /q build-reldbg
-if exist build-linux rmdir /s /q build-linux
-if exist build-msvc rmdir /s /q build-msvc
+if exist build\debug rmdir /s /q build\debug
+if exist build\release rmdir /s /q build\release
+if exist build\reldbg rmdir /s /q build\reldbg
+if exist build\linux rmdir /s /q build\linux
+if exist build\msvc rmdir /s /q build\msvc
 if exist build rmdir /s /q build
 echo === Done ===
 goto :eof
