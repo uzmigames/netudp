@@ -44,6 +44,7 @@ public:
         recv_seq_ = 0;
         last_delivered_seq_ = 0;
         nagle_accumulate_time_ = 0.0;
+        nagle_threshold_sec_ = static_cast<double>(config.nagle_ms) / 1000.0;
         stats_ = {};
         send_queue_.clear();
     }
@@ -87,11 +88,10 @@ public:
         if (nagle_ready_) {
             return true;
         }
-        if (config_.nagle_ms == 0) {
+        if (nagle_threshold_sec_ <= 0.0) {
             return true; /* Nagle disabled */
         }
-        double nagle_sec = static_cast<double>(config_.nagle_ms) / 1000.0;
-        return (now - nagle_accumulate_time_) >= nagle_sec;
+        return (now - nagle_accumulate_time_) >= nagle_threshold_sec_;
     }
 
     /** Dequeue the next message to send. Returns false if no messages ready. */
@@ -161,6 +161,7 @@ private:
     uint16_t recv_seq_ = 0;
     uint16_t last_delivered_seq_ = 0;
     double   nagle_accumulate_time_ = 0.0;
+    double   nagle_threshold_sec_ = 0.0;
     bool     nagle_ready_ = false;
     ChannelStats stats_ = {};
     FixedRingBuffer<QueuedMessage, 256> send_queue_;

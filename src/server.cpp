@@ -64,14 +64,13 @@ struct netudp_server {
     uint8_t challenge_key[32] = {};
     uint64_t challenge_sequence = 0;
 
-    struct FingerprintEntry {
-        netudp::TokenFingerprint fingerprint;
+    /* Fingerprint anti-replay: hash(8 bytes) → (address, expire_time).
+     * O(1) lookup via FixedHashMap instead of O(N) linear scan. */
+    struct FingerprintValue {
         netudp_address_t address;
         uint64_t expire_time;
-        bool used;
     };
-    FingerprintEntry fingerprint_cache[1024] = {};
-    int fingerprint_count = 0;
+    netudp::FixedHashMap<uint64_t, FingerprintValue, 2048> fingerprint_map;
 
     double current_time = 0.0;
     double last_time = 0.0;
@@ -831,23 +830,23 @@ void server_handle_connection_request(netudp_server* server,
 
     auto fp = compute_token_fingerprint(server->config.private_key,
                                          encrypted_private, TOKEN_PRIVATE_ENCRYPTED_SIZE);
-    for (int i = 0; i < server->fingerprint_count; ++i) {
-        auto& entry = server->fingerprint_cache[i];
-        if (entry.used && std::memcmp(entry.fingerprint.hash, fp.hash, 8) == 0) {
-            if (!netudp_address_equal(&entry.address, from)) {
-                return;
-            }
-            break;
+    uint64_t fp_key = 0;
+    std::memcpy(&fp_key, fp.hash, 8);
+
+    /* O(1) fingerprint anti-replay check */
+    auto* existing = server->fingerprint_map.find(fp_key);
+    if (existing != nullptr) {
+        if (!netudp_address_equal(&existing->address, from)) {
+            return; /* Same token used from different address — replay attack */
         }
+        /* Same address reusing same token — allow (reconnect) */
     }
 
-    if (server->fingerprint_count < 1024) {
-        auto& entry = server->fingerprint_cache[server->fingerprint_count++];
-        entry.fingerprint = fp;
-        entry.address = *from;
-        entry.expire_time = expire_ts;
-        entry.used = true;
-    }
+    /* Insert/update fingerprint entry */
+    netudp_server::FingerprintValue fp_val;
+    fp_val.address = *from;
+    fp_val.expire_time = expire_ts;
+    server->fingerprint_map.insert(fp_key, fp_val);
 
     /* O(1) slot allocation from free stack */
     if (server->free_count <= 0) {
