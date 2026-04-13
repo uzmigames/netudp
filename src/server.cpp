@@ -241,22 +241,35 @@ static void pipeline_recv_thread(netudp_server* server) {
     }
 }
 
-/** Send thread: drains send_queue and calls socket_send in batches. */
+/** Send thread: drains send_queue and calls socket_send_batch (batched syscall). */
 static void pipeline_send_thread(netudp_server* server) {
-    while (server->pipeline_running.load(std::memory_order_relaxed)) {
-        QueuedOutPacket pkt;
-        bool sent_any = false;
+    /* Pre-allocate batch storage on thread stack */
+    uint8_t batch_storage[netudp::kSocketBatchMax][NETUDP_MAX_PACKET_ON_WIRE] = {};
+    netudp::SocketPacket batch[netudp::kSocketBatchMax] = {};
+    for (int i = 0; i < netudp::kSocketBatchMax; ++i) {
+        batch[i].data = batch_storage[i];
+    }
 
-        /* Drain up to kSocketBatchMax packets per iteration */
+    while (server->pipeline_running.load(std::memory_order_relaxed)) {
+        NETUDP_ZONE("pipe::send_drain");
+        QueuedOutPacket pkt;
+        int count = 0;
+
+        /* Drain up to kSocketBatchMax packets into batch array */
         for (int i = 0; i < netudp::kSocketBatchMax; ++i) {
             if (!server->send_queue->pop(&pkt)) {
                 break;
             }
-            netudp::socket_send(&server->socket, &pkt.addr, pkt.data, pkt.len);
-            sent_any = true;
+            batch[count].addr = pkt.addr;
+            std::memcpy(batch[count].data, pkt.data, static_cast<size_t>(pkt.len));
+            batch[count].len = pkt.len;
+            ++count;
         }
 
-        if (!sent_any) {
+        if (count > 0) {
+            /* Batch send: sendmmsg on Linux, WSASendTo loop on Windows */
+            netudp::socket_send_batch(&server->socket, batch, count);
+        } else {
             std::this_thread::sleep_for(std::chrono::microseconds(50));
         }
     }

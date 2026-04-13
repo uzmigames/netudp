@@ -131,10 +131,44 @@ int socket_create(Socket* out, const netudp_address_t* bind_addr,
     WSAIoctl(sock, SIO_LOOPBACK_FAST_PATH,
              &loopback_fast, sizeof(loopback_fast),
              nullptr, 0, &bytes_returned, nullptr, nullptr);
+
+    /* SIO_UDP_CONNRESET = FALSE — prevents ICMP port-unreachable from killing
+     * recvfrom when a client hard-disconnects. Without this, the next recvfrom
+     * fails with WSAECONNRESET, silently dropping packets for OTHER clients.
+     * Used by netcode.io and MsQuic. */
+#ifndef SIO_UDP_CONNRESET
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
+    BOOL connreset = FALSE;
+    DWORD connreset_bytes = 0;
+    WSAIoctl(sock, SIO_UDP_CONNRESET,
+             &connreset, sizeof(connreset),
+             nullptr, 0, &connreset_bytes, nullptr, nullptr);
+
+    /* IP_DONTFRAGMENT — avoids per-packet PMTU discovery overhead.
+     * We already use conservative MTU (1200). Used by MsQuic. */
+    DWORD dont_frag = 1;
+    setsockopt(sock, IPPROTO_IP, IP_DONTFRAGMENT,
+               reinterpret_cast<const char*>(&dont_frag), sizeof(dont_frag));
+
     (void)flags;
 #endif
 
-    /* Buffer sizes */
+    /* IP_TOS / DSCP 46 (Expedited Forwarding) — QoS marking for routers.
+     * Helps on managed networks. Used by netcode.io. */
+    int tos = 0x2E; /* DSCP 46 = Expedited Forwarding */
+#ifdef NETUDP_PLATFORM_WINDOWS
+    setsockopt(sock, IPPROTO_IP, IP_TOS,
+               reinterpret_cast<const char*>(&tos), sizeof(tos));
+#else
+    setsockopt(sock, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
+#endif
+
+    /* Buffer sizes — enforce minimum 16MB recv buffer to prevent burst drops.
+     * MsQuic uses MAXINT32. netcode.io uses 4MB. We use max(caller, 16MB). */
+    static constexpr int kMinRecvBuf = 16 * 1024 * 1024;
+    if (recv_buf_size < kMinRecvBuf) { recv_buf_size = kMinRecvBuf; }
+
     setsockopt(sock, SOL_SOCKET, SO_SNDBUF,
                reinterpret_cast<const char*>(&send_buf_size), sizeof(send_buf_size));
     setsockopt(sock, SOL_SOCKET, SO_RCVBUF,
