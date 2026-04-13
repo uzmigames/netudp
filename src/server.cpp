@@ -354,6 +354,10 @@ netudp_server_t* netudp_server_create(const char* address,
         delete server;
         return nullptr;
     }
+    /* Pin primary socket to CPU 0 for RSS distribution */
+    if (num_threads > 1) {
+        netudp::socket_set_cpu_affinity(&server->socket, 0);
+    }
 
     /* Create additional IO worker sockets for multi-threaded mode */
     if (num_threads > 1) {
@@ -377,6 +381,8 @@ netudp_server_t* netudp_server_create(const char* address,
                 delete server;
                 return nullptr;
             }
+            /* Auto CPU affinity: pin worker socket N to CPU N+1 (CPU 0 = primary) */
+            netudp::socket_set_cpu_affinity(&server->io_workers[i].socket, i + 1);
         }
     }
 

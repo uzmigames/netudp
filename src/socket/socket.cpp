@@ -151,6 +151,16 @@ int socket_create(Socket* out, const netudp_address_t* bind_addr,
     setsockopt(sock, IPPROTO_IP, IP_DONTFRAGMENT,
                reinterpret_cast<const char*>(&dont_frag), sizeof(dont_frag));
 
+    /* UDP Receive Offload (URO) — NIC coalesces incoming datagrams into one
+     * large recv buffer. Reduces recv syscalls by 2-5x. Used by MsQuic.
+     * Windows 10 1809+ / Server 2019+. Silently ignored on older. */
+#ifndef UDP_RECV_MAX_COALESCED_SIZE
+#define UDP_RECV_MAX_COALESCED_SIZE 3
+#endif
+    DWORD uro_size = 65527; /* UINT16_MAX - 8, same as MsQuic */
+    setsockopt(sock, IPPROTO_UDP, UDP_RECV_MAX_COALESCED_SIZE,
+               reinterpret_cast<const char*>(&uro_size), sizeof(uro_size));
+
     (void)flags;
 #endif
 
@@ -162,6 +172,15 @@ int socket_create(Socket* out, const netudp_address_t* bind_addr,
                reinterpret_cast<const char*>(&tos), sizeof(tos));
 #else
     setsockopt(sock, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
+
+    /* UDP GRO (Generic Receive Offload) — kernel coalesces incoming datagrams.
+     * Reduces per-packet processing in recv path. Linux 5.0+.
+     * Silently ignored if not supported. Used by Cloudflare QUIC. */
+#ifndef UDP_GRO
+#define UDP_GRO 104
+#endif
+    int gro = 1;
+    setsockopt(sock, SOL_UDP, UDP_GRO, &gro, sizeof(gro));
 #endif
 
     /* Buffer sizes — enforce minimum 16MB recv buffer to prevent burst drops.
@@ -316,6 +335,26 @@ int socket_send_connected(Socket* sock, const void* data, int len) {
     return (result == SOCKET_ERROR) ? -1 : result;
 #else
     return (result < 0) ? -1 : result;
+#endif
+}
+
+void socket_set_cpu_affinity(Socket* sock, int cpu_id) {
+    if (sock == nullptr || sock->handle == NETUDP_INVALID_SOCKET || cpu_id < 0) {
+        return;
+    }
+#ifdef NETUDP_PLATFORM_WINDOWS
+    /* SIO_CPU_AFFINITY — binds socket to a specific CPU for RSS distribution.
+     * Used by MsQuic for per-processor socket design. */
+#ifndef SIO_CPU_AFFINITY
+#define SIO_CPU_AFFINITY _WSAIOW(IOC_VENDOR, 21)
+#endif
+    DWORD cpu = static_cast<DWORD>(cpu_id);
+    DWORD bytes = 0;
+    WSAIoctl(sock->handle, SIO_CPU_AFFINITY,
+             &cpu, sizeof(cpu), nullptr, 0, &bytes, nullptr, nullptr);
+#else
+    /* Linux: use thread affinity (sched_setaffinity) instead of socket affinity */
+    (void)cpu_id;
 #endif
 }
 

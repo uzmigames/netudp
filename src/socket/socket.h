@@ -95,6 +95,13 @@ int socket_connect(Socket* sock, const netudp_address_t* dest);
 int socket_send_connected(Socket* sock, const void* data, int len);
 
 /**
+ * Bind socket to a specific CPU core (Windows SIO_CPU_AFFINITY).
+ * Enables NIC RSS to deliver packets for this socket to the bound CPU.
+ * No-op on Linux (use thread affinity via sched_setaffinity instead).
+ */
+void socket_set_cpu_affinity(Socket* sock, int cpu_id);
+
+/**
  * Close socket.
  */
 void socket_destroy(Socket* sock);
