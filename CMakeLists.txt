@@ -82,6 +82,7 @@ set(NETUDP_SOURCES
     src/api.cpp
     src/server.cpp
     src/client.cpp
+    src/replication/replicate.cpp
     src/sim/network_sim.cpp
     src/core/address.cpp
     src/connection/connect_token.cpp

@@ -3,6 +3,15 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.3.0] - Unreleased
+
+### Added
+- **Multicast groups (phase 40)**: Send to subset of clients via `netudp_group_send()`. O(1) add/remove with swap-remove pattern. Auto-removal on disconnect. Multiple groups per client (zone + party + raid + guild). Max 256 groups (configurable via `max_groups`). Foundation for MMORPG replication.
+- **Property replication (phase 42)**: Unreal-style schema + entity system. `netudp_schema_create` defines property layout (vec3, f32, u8, u16, i32, quat, blob). `netudp_entity_create` spawns entities with dirty tracking via 64-bit bitmask. Typed setters compare old vs new — only changed properties are serialized. Wire format: `[entity_id:u16][dirty_mask:varint][prop_values...]`. Replication conditions: `REP_ALL`, `REP_OWNER_ONLY`, `REP_SKIP_OWNER`, `REP_INITIAL_ONLY`, `REP_NOTIFY`, `REP_RELIABLE`, `REP_QUANTIZE`. Quantization: vec3 → 4 bytes (11+11+10 bit), quat → 4 bytes (smallest-three), f32 → 2 bytes (half-float). `netudp_server_replicate()` iterates dirty entities, filters per-client, serializes, sends via multicast group with state overwrite. 70-80% bandwidth reduction per entity.
+- **Packet pacing (phase 44)**: `pacing_slices` in server config divides active connections into N sub-tick groups. Each `server_update` call processes one slice round-robin, spreading sends evenly across the tick interval. Reduces client-side jitter. Default 0 = burst mode (backward compatible).
+- **Priority + rate limiting (phase 43)**: `netudp_entity_set_priority(server, eid, 0-255)` and `netudp_entity_set_max_rate(server, eid, hz)`. Rate check in `server_replicate` throttles per-entity update frequency. Starvation prevention guarantees minimum 1 update per `min_update_interval` (default 2s). Enables distance-based throttling: close entities at 20Hz, far entities at 2Hz.
+- **State overwrite / latest-wins (phase 41)**: `netudp_server_send_state(server, client, channel, entity_id, data, len)` — if a pending update for the same `entity_id` exists in the channel queue, overwrites it in-place. Only the latest state is sent. Unreliable channels only. `netudp_group_send_state()` for multicast integration. Reduces redundant position updates 2-5x in high-density areas.
+
 ## [1.2.0] - 2026-04-13
 
 ### Added

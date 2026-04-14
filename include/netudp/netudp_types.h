@@ -40,6 +40,7 @@ extern "C" {
 #define NETUDP_SEND_RELIABLE    1
 #define NETUDP_SEND_NO_NAGLE    2
 #define NETUDP_SEND_NO_DELAY    4  /* NO_NAGLE + immediate flush */
+#define NETUDP_SEND_STATE       8  /* State overwrite: latest-wins per entity_id (unreliable only) */
 
 /* --- SIMD levels --- */
 
@@ -151,6 +152,12 @@ typedef struct netudp_server_config {
 
     /* Crypto mode */
     uint8_t crypto_mode; /**< netudp_crypto_mode_t. Default: NETUDP_CRYPTO_AUTO (AES-GCM if AES-NI, else XChaCha20). */
+
+    /* Multicast groups (phase 40) */
+    int max_groups; /**< Max simultaneous groups. 0 = default (256). */
+
+    /* Packet pacing (phase 44) */
+    int pacing_slices; /**< Divide sends into N sub-tick slices. 0 = burst mode (default). */
 
     /* Threading (Linux only — SO_REUSEPORT multi-thread I/O) */
     int num_io_threads; /**< Number of I/O threads. 0 or 1 = single-threaded (default). */

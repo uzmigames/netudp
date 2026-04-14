@@ -15,6 +15,10 @@
 #include "core/hash_map.h"
 #include "core/log.h"
 #include "wire/frame.h"
+#include "group/group.h"
+#include "replication/schema.h"
+#include "replication/entity.h"
+#include "replication/replicate.h"
 #include "profiling/profiler.h"
 #include "reliability/packet_tracker.h"
 #include "sim/network_sim.h"
@@ -199,6 +203,28 @@ struct netudp_server {
     int  free_count = 0;
     int* slot_to_active = nullptr; /* Maps slot index → position in active_slots (-1 if inactive) */
 
+    /* Multicast groups (phase 40) */
+    netudp::Group* groups = nullptr;
+    int  max_groups = 0;
+    int* group_free_stack = nullptr; /* Free group index stack */
+    int  group_free_count = 0;
+
+    /* Per-group pre-allocated buffers (members[] + slot_to_pos[]) */
+    int* group_member_pool = nullptr;   /* max_groups * max_clients ints for members */
+    int* group_slot_pool = nullptr;     /* max_groups * max_clients ints for slot_to_pos */
+
+    /* Packet pacing (phase 44) */
+    int pacing_slices = 0;          /* 0 = burst (default), >0 = N slices per tick */
+    int pacing_current_slice = 0;   /* Current slice being sent this tick */
+
+    /* Property replication (phase 42) */
+    static constexpr int kMaxSchemas = 64;
+    static constexpr int kMaxEntities = 16384;
+    netudp::Schema  schemas[kMaxSchemas] = {};
+    int schema_count = 0;
+    netudp::Entity* entities = nullptr;  /* Array of kMaxEntities */
+    uint16_t next_entity_id = 1;         /* Auto-increment (0 = invalid) */
+
     /* Connection worker threads (phase 35) — parallel per-connection processing */
     int num_workers = 1;           /* 1 = single-threaded (default) */
     std::vector<std::thread> workers;
@@ -380,6 +406,15 @@ static void server_deactivate_slot(netudp_server* server, int slot) {
 
     /* Push slot back to free stack */
     server->free_slots[server->free_count++] = slot;
+
+    /* Remove from all multicast groups (phase 40) */
+    if (server->groups != nullptr) {
+        for (int g = 0; g < server->max_groups; ++g) {
+            if (server->groups[g].active) {
+                server->groups[g].remove(slot);
+            }
+        }
+    }
 }
 
 /* ======================================================================
@@ -510,6 +545,33 @@ void netudp_server_start(netudp_server_t* server, int max_clients) {
         server->slot_to_active[i] = -1;
     }
 
+    /* Multicast groups (phase 40) */
+    {
+        int mg = server->config.max_groups;
+        if (mg <= 0) { mg = 256; }
+        server->max_groups = mg;
+        server->groups = new (std::nothrow) netudp::Group[static_cast<size_t>(mg)]();
+        server->group_free_stack = new (std::nothrow) int[static_cast<size_t>(mg)];
+        server->group_free_count = mg;
+        for (int i = 0; i < mg; ++i) {
+            server->group_free_stack[i] = mg - 1 - i; /* Top = index 0 */
+        }
+
+        /* Pre-allocate per-group member + slot_to_pos buffers */
+        int cap = (max_clients < netudp::kMaxGroupMembers) ? max_clients : netudp::kMaxGroupMembers;
+        size_t pool_ints = static_cast<size_t>(mg) * static_cast<size_t>(cap);
+        server->group_member_pool = new (std::nothrow) int[pool_ints];
+        size_t slot_ints = static_cast<size_t>(mg) * static_cast<size_t>(max_clients);
+        server->group_slot_pool = new (std::nothrow) int[slot_ints];
+    }
+
+    /* Packet pacing (phase 44) */
+    server->pacing_slices = server->config.pacing_slices;
+    server->pacing_current_slice = 0;
+
+    /* Entity pool (phase 42) */
+    server->entities = new (std::nothrow) netudp::Entity[netudp_server::kMaxEntities]();
+
     netudp::crypto::random_bytes(server->challenge_key, 32);
     server->challenge_sequence = 0;
 
@@ -596,6 +658,24 @@ void netudp_server_stop(netudp_server_t* server) {
     }
     server->active_count = 0;
     server->free_count = 0;
+
+    /* Free entity pool */
+    delete[] server->entities;
+    server->entities = nullptr;
+    server->schema_count = 0;
+    server->next_entity_id = 1;
+
+    /* Free multicast groups */
+    delete[] server->groups;
+    server->groups = nullptr;
+    delete[] server->group_free_stack;
+    server->group_free_stack = nullptr;
+    delete[] server->group_member_pool;
+    server->group_member_pool = nullptr;
+    delete[] server->group_slot_pool;
+    server->group_slot_pool = nullptr;
+    server->max_groups = 0;
+    server->group_free_count = 0;
 }
 
 int netudp_server_max_clients(const netudp_server_t* server) {
@@ -912,8 +992,25 @@ void netudp_server_update(netudp_server_t* server, double time) {
         }
         server->workers_go.store(false, std::memory_order_release);
     } else {
-        /* Single-threaded: process all connections inline */
-        for (int a = 0; a < server->active_count; ++a) {
+        /* Single-threaded: process connections inline.
+         * Phase 44: pacing divides active connections into N slices.
+         * Each server_update call processes one slice, round-robin. */
+        int slice_start = 0;
+        int slice_end = server->active_count;
+
+        if (server->pacing_slices > 1 && server->active_count > server->pacing_slices) {
+            int per_slice = server->active_count / server->pacing_slices;
+            int remainder = server->active_count % server->pacing_slices;
+            int s = server->pacing_current_slice % server->pacing_slices;
+
+            slice_start = s * per_slice + (s < remainder ? s : remainder);
+            int this_slice = per_slice + (s < remainder ? 1 : 0);
+            slice_end = slice_start + this_slice;
+
+            server->pacing_current_slice = (s + 1) % server->pacing_slices;
+        }
+
+        for (int a = slice_start; a < slice_end; ++a) {
             int i = server->active_slots[a];
             netudp::Connection& conn = server->connections[i];
 
@@ -1019,6 +1116,59 @@ int netudp_server_send(netudp_server_t* server, int client_index,
     }
 
     return NETUDP_OK;
+}
+
+int netudp_server_send_state(netudp_server_t* server, int client_index,
+                             int channel, uint16_t entity_id,
+                             const void* data, int bytes) {
+    NETUDP_ZONE("srv::send_state");
+    if (server == nullptr || !server->running) {
+        return NETUDP_ERROR_NOT_INITIALIZED;
+    }
+    if (client_index < 0 || client_index >= server->max_clients) {
+        return NETUDP_ERROR_INVALID_PARAM;
+    }
+    netudp::Connection& conn = server->connections[client_index];
+    if (!conn.active) {
+        return NETUDP_ERROR_NOT_CONNECTED;
+    }
+    if (channel < 0 || channel >= conn.num_channels) {
+        return NETUDP_ERROR_INVALID_PARAM;
+    }
+
+    /* State overwrite only on unreliable channels */
+    uint8_t ch_type = conn.ch(channel).type();
+    if (ch_type == NETUDP_CHANNEL_RELIABLE_ORDERED ||
+        ch_type == NETUDP_CHANNEL_RELIABLE_UNORDERED) {
+        return NETUDP_ERROR_INVALID_PARAM;
+    }
+
+    if (!conn.ch(channel).queue_send_state(
+            static_cast<const uint8_t*>(data), bytes, 0, entity_id)) {
+        return NETUDP_ERROR_NO_BUFFERS;
+    }
+    conn.pending_mask |= static_cast<uint8_t>(1U << channel);
+    conn.ch(channel).start_nagle(server->current_time);
+    return NETUDP_OK;
+}
+
+void netudp_group_send_state(netudp_server_t* server, int group_id,
+                             int channel, uint16_t entity_id,
+                             const void* data, int bytes) {
+    NETUDP_ZONE("srv::group_send_state");
+    if (server == nullptr || !server->running) {
+        return;
+    }
+    if (group_id < 0 || group_id >= server->max_groups) {
+        return;
+    }
+    const netudp::Group& g = server->groups[group_id];
+    if (!g.active) {
+        return;
+    }
+    for (int i = 0; i < g.member_count; ++i) {
+        netudp_server_send_state(server, g.members[i], channel, entity_id, data, bytes);
+    }
 }
 
 /* ======================================================================
@@ -1156,6 +1306,337 @@ void netudp_server_flush(netudp_server_t* server, int client_index) {
         conn.ch(ch).flush();
     }
     netudp::server_send_pending(server, client_index);
+}
+
+/* ======================================================================
+ * Multicast Groups (phase 40)
+ * ====================================================================== */
+
+int netudp_group_create(netudp_server_t* server) {
+    if (server == nullptr || !server->running) {
+        return -1;
+    }
+    if (server->group_free_count <= 0) {
+        return -1; /* No free group slots */
+    }
+
+    int idx = server->group_free_stack[--server->group_free_count];
+    int cap = (server->max_clients < netudp::kMaxGroupMembers)
+              ? server->max_clients : netudp::kMaxGroupMembers;
+
+    int* member_buf = server->group_member_pool +
+                      static_cast<size_t>(idx) * static_cast<size_t>(cap);
+    int* slot_buf   = server->group_slot_pool +
+                      static_cast<size_t>(idx) * static_cast<size_t>(server->max_clients);
+
+    server->groups[idx].init(idx, server->max_clients, member_buf, slot_buf, cap);
+    return idx;
+}
+
+void netudp_group_destroy(netudp_server_t* server, int group_id) {
+    if (server == nullptr || group_id < 0 || group_id >= server->max_groups) {
+        return;
+    }
+    netudp::Group& g = server->groups[group_id];
+    if (!g.active) {
+        return;
+    }
+    g.reset();
+    server->group_free_stack[server->group_free_count++] = group_id;
+}
+
+int netudp_group_add(netudp_server_t* server, int group_id, int client_index) {
+    if (server == nullptr || group_id < 0 || group_id >= server->max_groups) {
+        return NETUDP_ERROR_INVALID_PARAM;
+    }
+    netudp::Group& g = server->groups[group_id];
+    if (!g.active) {
+        return NETUDP_ERROR_INVALID_PARAM;
+    }
+    if (client_index < 0 || client_index >= server->max_clients) {
+        return NETUDP_ERROR_INVALID_PARAM;
+    }
+    if (!server->connections[client_index].active) {
+        return NETUDP_ERROR_NOT_CONNECTED;
+    }
+    return g.add(client_index) ? NETUDP_OK : NETUDP_ERROR_NO_BUFFERS;
+}
+
+int netudp_group_remove(netudp_server_t* server, int group_id, int client_index) {
+    if (server == nullptr || group_id < 0 || group_id >= server->max_groups) {
+        return NETUDP_ERROR_INVALID_PARAM;
+    }
+    netudp::Group& g = server->groups[group_id];
+    if (!g.active) {
+        return NETUDP_ERROR_INVALID_PARAM;
+    }
+    return g.remove(client_index) ? NETUDP_OK : NETUDP_ERROR_INVALID_PARAM;
+}
+
+void netudp_group_send(netudp_server_t* server, int group_id,
+                       int channel, const void* data, int bytes, int flags) {
+    NETUDP_ZONE("srv::group_send");
+    if (server == nullptr || !server->running) {
+        return;
+    }
+    if (group_id < 0 || group_id >= server->max_groups) {
+        return;
+    }
+    const netudp::Group& g = server->groups[group_id];
+    if (!g.active) {
+        return;
+    }
+    for (int i = 0; i < g.member_count; ++i) {
+        netudp_server_send(server, g.members[i], channel, data, bytes, flags);
+    }
+}
+
+void netudp_group_send_except(netudp_server_t* server, int group_id, int except_client,
+                              int channel, const void* data, int bytes, int flags) {
+    NETUDP_ZONE("srv::group_send_except");
+    if (server == nullptr || !server->running) {
+        return;
+    }
+    if (group_id < 0 || group_id >= server->max_groups) {
+        return;
+    }
+    const netudp::Group& g = server->groups[group_id];
+    if (!g.active) {
+        return;
+    }
+    for (int i = 0; i < g.member_count; ++i) {
+        if (g.members[i] != except_client) {
+            netudp_server_send(server, g.members[i], channel, data, bytes, flags);
+        }
+    }
+}
+
+int netudp_group_count(const netudp_server_t* server, int group_id) {
+    if (server == nullptr || group_id < 0 || group_id >= server->max_groups) {
+        return 0;
+    }
+    const netudp::Group& g = server->groups[group_id];
+    return g.active ? g.member_count : 0;
+}
+
+int netudp_group_has(const netudp_server_t* server, int group_id, int client_index) {
+    if (server == nullptr || group_id < 0 || group_id >= server->max_groups) {
+        return 0;
+    }
+    return server->groups[group_id].has(client_index) ? 1 : 0;
+}
+
+/* ======================================================================
+ * Property Replication API (phase 42)
+ * ====================================================================== */
+
+static netudp::Entity* find_entity(netudp_server_t* s, uint16_t eid) {
+    if (s == nullptr || s->entities == nullptr || eid == 0) { return nullptr; }
+    for (int i = 0; i < netudp_server::kMaxEntities; ++i) {
+        if (s->entities[i].active && s->entities[i].entity_id == eid) {
+            return &s->entities[i];
+        }
+    }
+    return nullptr;
+}
+
+int netudp_schema_create(netudp_server_t* server) {
+    if (server == nullptr) { return -1; }
+    if (server->schema_count >= netudp_server::kMaxSchemas) { return -1; }
+    int id = server->schema_count++;
+    server->schemas[id] = netudp::Schema{};
+    server->schemas[id].schema_id = id;
+    return id;
+}
+
+void netudp_schema_destroy(netudp_server_t* server, int schema_id) {
+    if (server == nullptr || schema_id < 0 || schema_id >= server->schema_count) { return; }
+    server->schemas[schema_id] = netudp::Schema{};
+    server->schemas[schema_id].schema_id = -1;
+}
+
+int netudp_schema_add_u8(netudp_server_t* s, int sid, const char* name, uint16_t flags) {
+    if (s == nullptr || sid < 0 || sid >= s->schema_count) { return -1; }
+    return s->schemas[sid].add_prop(name, netudp::PropType::U8, flags, 1, 1);
+}
+int netudp_schema_add_u16(netudp_server_t* s, int sid, const char* name, uint16_t flags) {
+    if (s == nullptr || sid < 0 || sid >= s->schema_count) { return -1; }
+    return s->schemas[sid].add_prop(name, netudp::PropType::U16, flags, 2, 2);
+}
+int netudp_schema_add_i32(netudp_server_t* s, int sid, const char* name, uint16_t flags) {
+    if (s == nullptr || sid < 0 || sid >= s->schema_count) { return -1; }
+    return s->schemas[sid].add_prop(name, netudp::PropType::I32, flags, 4, 4);
+}
+int netudp_schema_add_f32(netudp_server_t* s, int sid, const char* name, uint16_t flags) {
+    if (s == nullptr || sid < 0 || sid >= s->schema_count) { return -1; }
+    return s->schemas[sid].add_prop(name, netudp::PropType::F32, flags, 4, 2);
+}
+int netudp_schema_add_vec3(netudp_server_t* s, int sid, const char* name, uint16_t flags) {
+    if (s == nullptr || sid < 0 || sid >= s->schema_count) { return -1; }
+    return s->schemas[sid].add_prop(name, netudp::PropType::VEC3, flags, 12, 4);
+}
+int netudp_schema_add_quat(netudp_server_t* s, int sid, const char* name, uint16_t flags) {
+    if (s == nullptr || sid < 0 || sid >= s->schema_count) { return -1; }
+    return s->schemas[sid].add_prop(name, netudp::PropType::QUAT, flags, 16, 4);
+}
+int netudp_schema_add_blob(netudp_server_t* s, int sid, const char* name, int max_bytes, uint16_t flags) {
+    if (s == nullptr || sid < 0 || sid >= s->schema_count || max_bytes <= 0) { return -1; }
+    return s->schemas[sid].add_prop(name, netudp::PropType::BLOB, flags, max_bytes, max_bytes, max_bytes);
+}
+
+uint16_t netudp_entity_create(netudp_server_t* server, int schema_id) {
+    if (server == nullptr || server->entities == nullptr) { return 0; }
+    if (schema_id < 0 || schema_id >= server->schema_count) { return 0; }
+    if (server->schemas[schema_id].schema_id < 0) { return 0; }
+
+    /* Find free entity slot */
+    for (int i = 0; i < netudp_server::kMaxEntities; ++i) {
+        if (!server->entities[i].active) {
+            netudp::Entity& e = server->entities[i];
+            e.reset();
+            e.active = true;
+            e.entity_id = server->next_entity_id++;
+            if (server->next_entity_id == 0) { server->next_entity_id = 1; } /* Skip 0 */
+            e.schema_id = schema_id;
+            e.schema = &server->schemas[schema_id];
+            return e.entity_id;
+        }
+    }
+    return 0; /* No free slots */
+}
+
+void netudp_entity_destroy(netudp_server_t* server, uint16_t entity_id) {
+    netudp::Entity* e = find_entity(server, entity_id);
+    if (e != nullptr) { e->reset(); }
+}
+
+void netudp_entity_set_group(netudp_server_t* server, uint16_t entity_id, int group_id) {
+    netudp::Entity* e = find_entity(server, entity_id);
+    if (e != nullptr) { e->group_id = group_id; }
+}
+
+void netudp_entity_set_owner(netudp_server_t* server, uint16_t entity_id, int client_index) {
+    netudp::Entity* e = find_entity(server, entity_id);
+    if (e != nullptr) { e->owner_client = client_index; }
+}
+
+int netudp_entity_set_u8(netudp_server_t* s, uint16_t eid, int pi, uint8_t val) {
+    netudp::Entity* e = find_entity(s, eid);
+    return (e != nullptr && e->set_u8(pi, val)) ? NETUDP_OK : NETUDP_ERROR_INVALID_PARAM;
+}
+int netudp_entity_set_u16(netudp_server_t* s, uint16_t eid, int pi, uint16_t val) {
+    netudp::Entity* e = find_entity(s, eid);
+    return (e != nullptr && e->set_u16(pi, val)) ? NETUDP_OK : NETUDP_ERROR_INVALID_PARAM;
+}
+int netudp_entity_set_i32(netudp_server_t* s, uint16_t eid, int pi, int32_t val) {
+    netudp::Entity* e = find_entity(s, eid);
+    return (e != nullptr && e->set_i32(pi, val)) ? NETUDP_OK : NETUDP_ERROR_INVALID_PARAM;
+}
+int netudp_entity_set_f32(netudp_server_t* s, uint16_t eid, int pi, float val) {
+    netudp::Entity* e = find_entity(s, eid);
+    return (e != nullptr && e->set_f32(pi, val)) ? NETUDP_OK : NETUDP_ERROR_INVALID_PARAM;
+}
+int netudp_entity_set_vec3(netudp_server_t* s, uint16_t eid, int pi, const float v[3]) {
+    netudp::Entity* e = find_entity(s, eid);
+    return (e != nullptr && e->set_vec3(pi, v)) ? NETUDP_OK : NETUDP_ERROR_INVALID_PARAM;
+}
+int netudp_entity_set_quat(netudp_server_t* s, uint16_t eid, int pi, const float q[4]) {
+    netudp::Entity* e = find_entity(s, eid);
+    return (e != nullptr && e->set_quat(pi, q)) ? NETUDP_OK : NETUDP_ERROR_INVALID_PARAM;
+}
+int netudp_entity_set_blob(netudp_server_t* s, uint16_t eid, int pi, const void* data, int len) {
+    netudp::Entity* e = find_entity(s, eid);
+    return (e != nullptr && e->set_blob(pi, data, len)) ? NETUDP_OK : NETUDP_ERROR_INVALID_PARAM;
+}
+
+void netudp_entity_set_priority(netudp_server_t* server, uint16_t entity_id, uint8_t priority) {
+    netudp::Entity* e = find_entity(server, entity_id);
+    if (e != nullptr) { e->priority = priority; }
+}
+
+void netudp_entity_set_max_rate(netudp_server_t* server, uint16_t entity_id, float hz) {
+    netudp::Entity* e = find_entity(server, entity_id);
+    if (e != nullptr) { e->max_rate_hz = hz; }
+}
+
+void netudp_server_replicate(netudp_server_t* server) {
+    NETUDP_ZONE("srv::replicate");
+    if (server == nullptr || !server->running || server->entities == nullptr) {
+        return;
+    }
+
+    uint8_t wire_buf[netudp::kEntityMaxValueSize + 32];
+
+    double now = server->current_time;
+
+    for (int ei = 0; ei < netudp_server::kMaxEntities; ++ei) {
+        netudp::Entity& ent = server->entities[ei];
+        if (!ent.active || ent.schema == nullptr) { continue; }
+        if (ent.dirty_mask == 0 && !ent.needs_initial) { continue; }
+        if (ent.group_id < 0 || ent.group_id >= server->max_groups) { continue; }
+
+        /* Phase 43: rate limiting — check if enough time has passed since last replicate */
+        if (!ent.needs_initial && ent.max_rate_hz > 0.0f) {
+            double interval = 1.0 / static_cast<double>(ent.max_rate_hz);
+            double elapsed = now - ent.last_replicate_time;
+            if (elapsed < interval) {
+                /* Starvation prevention: force update if too long since last send */
+                if (elapsed < static_cast<double>(ent.min_update_interval)) {
+                    continue; /* Rate limited — hold dirty bits for next tick */
+                }
+            }
+        }
+
+        const netudp::Group& grp = server->groups[ent.group_id];
+        if (!grp.active || grp.member_count == 0) {
+            ent.dirty_mask = 0;
+            ent.needs_initial = false;
+            continue;
+        }
+
+        /* Determine channel: reliable or unreliable based on REP_RELIABLE flag */
+        bool any_reliable = false;
+        for (int pi = 0; pi < ent.schema->prop_count; ++pi) {
+            if ((ent.dirty_mask & (1ULL << pi)) != 0 &&
+                (ent.schema->props[pi].rep_flags & netudp::REP_RELIABLE) != 0) {
+                any_reliable = true;
+                break;
+            }
+        }
+
+        /* Find appropriate channel (0=unreliable, scan for first reliable if needed) */
+        int channel = 0;
+        if (any_reliable) {
+            for (int ci = 0; ci < server->connections[grp.members[0]].num_channels; ++ci) {
+                uint8_t ct = server->connections[grp.members[0]].ch(ci).type();
+                if (ct == NETUDP_CHANNEL_RELIABLE_ORDERED || ct == NETUDP_CHANNEL_RELIABLE_UNORDERED) {
+                    channel = ci;
+                    break;
+                }
+            }
+        }
+
+        /* Serialize and send per member (filtering varies per client) */
+        for (int mi = 0; mi < grp.member_count; ++mi) {
+            int client = grp.members[mi];
+            bool is_initial = ent.needs_initial; /* Simplified: initial for all on first replicate */
+
+            int wire_len = netudp::replicate_serialize(ent, wire_buf, static_cast<int>(sizeof(wire_buf)),
+                                                        client, is_initial);
+            if (wire_len <= 0) { continue; }
+
+            if (!any_reliable) {
+                /* Use state overwrite for unreliable replication */
+                netudp_server_send_state(server, client, channel, ent.entity_id, wire_buf, wire_len);
+            } else {
+                netudp_server_send(server, client, channel, wire_buf, wire_len, 0);
+            }
+        }
+
+        ent.dirty_mask = 0;
+        ent.needs_initial = false;
+        ent.last_replicate_time = now;
+    }
 }
 
 void netudp_server_set_packet_handler(netudp_server_t* server, uint16_t packet_type,

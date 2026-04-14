@@ -56,12 +56,102 @@ int  netudp_server_send(netudp_server_t* server, int client_index,
                         int channel, const void* data, int bytes, int flags);
 int  netudp_client_send(netudp_client_t* client,
                         int channel, const void* data, int bytes, int flags);
+/** Send a state update with entity_id. If a pending update for the same entity_id
+ *  exists in the channel queue, overwrites it (latest-wins). Unreliable channels only. */
+int  netudp_server_send_state(netudp_server_t* server, int client_index,
+                              int channel, uint16_t entity_id,
+                              const void* data, int bytes);
+
+/** Send a state update to all members of a group (latest-wins per entity_id). */
+void netudp_group_send_state(netudp_server_t* server, int group_id,
+                             int channel, uint16_t entity_id,
+                             const void* data, int bytes);
+
 void netudp_server_broadcast(netudp_server_t* server, int channel,
                              const void* data, int bytes, int flags);
 void netudp_server_broadcast_except(netudp_server_t* server, int except_client,
                                     int channel, const void* data, int bytes, int flags);
 void netudp_server_flush(netudp_server_t* server, int client_index);
 void netudp_client_flush(netudp_client_t* client);
+
+/* --- Multicast Groups (phase 40) --- */
+
+/** Create a new multicast group. Returns group_id (>= 0) or -1 on error. */
+int  netudp_group_create(netudp_server_t* server);
+
+/** Destroy a group and release its slot. */
+void netudp_group_destroy(netudp_server_t* server, int group_id);
+
+/** Add a connected client to a group. Returns NETUDP_OK or error. */
+int  netudp_group_add(netudp_server_t* server, int group_id, int client_index);
+
+/** Remove a client from a group. Returns NETUDP_OK or error. */
+int  netudp_group_remove(netudp_server_t* server, int group_id, int client_index);
+
+/** Send data to all members of a group. */
+void netudp_group_send(netudp_server_t* server, int group_id,
+                       int channel, const void* data, int bytes, int flags);
+
+/** Send data to all members except one (skip-owner pattern). */
+void netudp_group_send_except(netudp_server_t* server, int group_id, int except_client,
+                              int channel, const void* data, int bytes, int flags);
+
+/** Returns the number of members in a group. */
+int  netudp_group_count(const netudp_server_t* server, int group_id);
+
+/** Returns 1 if client is a member of the group, 0 otherwise. */
+int  netudp_group_has(const netudp_server_t* server, int group_id, int client_index);
+
+/* --- Property Replication (phase 42) --- */
+
+/** Create a replication schema. Returns schema_id (>= 0) or -1 on error. */
+int netudp_schema_create(netudp_server_t* server);
+void netudp_schema_destroy(netudp_server_t* server, int schema_id);
+
+/** Add properties to a schema. Returns property index (>= 0) or -1. */
+int netudp_schema_add_u8(netudp_server_t* server, int schema_id, const char* name, uint16_t rep_flags);
+int netudp_schema_add_u16(netudp_server_t* server, int schema_id, const char* name, uint16_t rep_flags);
+int netudp_schema_add_i32(netudp_server_t* server, int schema_id, const char* name, uint16_t rep_flags);
+int netudp_schema_add_f32(netudp_server_t* server, int schema_id, const char* name, uint16_t rep_flags);
+int netudp_schema_add_vec3(netudp_server_t* server, int schema_id, const char* name, uint16_t rep_flags);
+int netudp_schema_add_quat(netudp_server_t* server, int schema_id, const char* name, uint16_t rep_flags);
+int netudp_schema_add_blob(netudp_server_t* server, int schema_id, const char* name, int max_bytes, uint16_t rep_flags);
+
+/** Create/destroy a replicated entity bound to a schema. Returns entity_id (> 0) or 0. */
+uint16_t netudp_entity_create(netudp_server_t* server, int schema_id);
+void     netudp_entity_destroy(netudp_server_t* server, uint16_t entity_id);
+
+/** Bind entity to a group and/or owner. */
+void netudp_entity_set_group(netudp_server_t* server, uint16_t entity_id, int group_id);
+void netudp_entity_set_owner(netudp_server_t* server, uint16_t entity_id, int client_index);
+
+/** Typed property setters (dirty bit set on change). prop_idx from schema_add_*. */
+int netudp_entity_set_u8(netudp_server_t* server, uint16_t entity_id, int prop_idx, uint8_t val);
+int netudp_entity_set_u16(netudp_server_t* server, uint16_t entity_id, int prop_idx, uint16_t val);
+int netudp_entity_set_i32(netudp_server_t* server, uint16_t entity_id, int prop_idx, int32_t val);
+int netudp_entity_set_f32(netudp_server_t* server, uint16_t entity_id, int prop_idx, float val);
+int netudp_entity_set_vec3(netudp_server_t* server, uint16_t entity_id, int prop_idx, const float v[3]);
+int netudp_entity_set_quat(netudp_server_t* server, uint16_t entity_id, int prop_idx, const float q[4]);
+int netudp_entity_set_blob(netudp_server_t* server, uint16_t entity_id, int prop_idx, const void* data, int len);
+
+/** Set entity replication priority (0-255, higher = more important, default 128). */
+void netudp_entity_set_priority(netudp_server_t* server, uint16_t entity_id, uint8_t priority);
+
+/** Set entity max replication rate in Hz (0 = unlimited, default 20). */
+void netudp_entity_set_max_rate(netudp_server_t* server, uint16_t entity_id, float hz);
+
+/** Replicate all dirty entities to their groups. Call once per tick. */
+void netudp_server_replicate(netudp_server_t* server);
+
+/* --- Replication condition flags --- */
+
+#define NETUDP_REP_ALL          0x0000
+#define NETUDP_REP_OWNER_ONLY   0x0001
+#define NETUDP_REP_SKIP_OWNER   0x0002
+#define NETUDP_REP_INITIAL_ONLY 0x0004
+#define NETUDP_REP_NOTIFY       0x0008
+#define NETUDP_REP_RELIABLE     0x0010
+#define NETUDP_REP_QUANTIZE     0x0020
 
 /* --- Packet handler dispatch --- */
 

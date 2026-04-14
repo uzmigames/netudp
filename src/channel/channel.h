@@ -23,6 +23,7 @@ struct QueuedMessage {
     uint8_t  data[NETUDP_MTU];
     int      size = 0;
     uint16_t sequence = 0;
+    uint16_t entity_id = 0;  /* State overwrite key (phase 41). 0 = no overwrite. */
     int      flags = 0;
     bool     valid = false;
 };
@@ -51,11 +52,42 @@ public:
 
     /** Queue a message for sending. Returns true if queued successfully. */
     bool queue_send(const uint8_t* data, int size, int flags) {
+        return queue_send_impl(data, size, flags, 0);
+    }
+
+    /** Queue a state update with entity_id. If a pending update for the same
+     *  entity_id exists, overwrites it in-place (latest-wins). Phase 41.
+     *  Only valid on unreliable channels. */
+    bool queue_send_state(const uint8_t* data, int size, int flags, uint16_t eid) {
+        return queue_send_impl(data, size, flags | NETUDP_SEND_STATE, eid);
+    }
+
+private:
+    bool queue_send_impl(const uint8_t* data, int size, int flags, uint16_t eid) {
         NETUDP_ZONE("chan::queue_send");
         if (size <= 0 || size > NETUDP_MTU) {
             NLOG_WARN("[netudp] chan::queue_send: message size %d out of range (max=%d)", size, NETUDP_MTU);
             return false;
         }
+
+        /* State overwrite: scan queue for existing entry with same entity_id */
+        if ((flags & NETUDP_SEND_STATE) != 0 && eid != 0) {
+            for (int i = send_queue_.size() - 1; i >= 0; --i) {
+                QueuedMessage& existing = send_queue_[i];
+                if (existing.entity_id == eid && (existing.flags & NETUDP_SEND_STATE) != 0) {
+                    /* Overwrite in-place — latest wins */
+                    std::memcpy(existing.data, data, static_cast<size_t>(size));
+                    existing.size = size;
+                    existing.flags = flags;
+                    /* Keep original sequence — position in queue unchanged */
+                    if ((flags & NETUDP_SEND_NO_NAGLE) != 0 || (flags & NETUDP_SEND_NO_DELAY) != 0) {
+                        nagle_ready_ = true;
+                    }
+                    return true;
+                }
+            }
+        }
+
         if (send_queue_.full()) {
             NLOG_WARN("[netudp] chan::queue_send: queue full (channel=%d)", index_);
             return false;
@@ -65,6 +97,7 @@ public:
         std::memcpy(msg.data, data, static_cast<size_t>(size));
         msg.size = size;
         msg.sequence = send_seq_++;
+        msg.entity_id = eid;
         msg.flags = flags;
         msg.valid = true;
 
@@ -78,6 +111,8 @@ public:
         stats_.bytes_sent += static_cast<uint32_t>(size);
         return true;
     }
+
+public:
 
     /** Check if there are messages ready to send (Nagle timer expired or bypassed). */
     bool has_pending(double now) const {
