@@ -37,8 +37,9 @@ void socket_platform_term() {}
 
 /* ===== Helpers ===== */
 
-static void address_to_sockaddr(const netudp_address_t* addr,
-                                 struct sockaddr_storage* ss, int* ss_len) {
+void address_to_sockaddr(const netudp_address_t* addr,
+                          void* ss_void, int* ss_len) {
+    auto* ss = static_cast<struct sockaddr_storage*>(ss_void);
     std::memset(ss, 0, sizeof(*ss));
 
     if (addr->type == NETUDP_ADDRESS_IPV6) {
@@ -200,6 +201,30 @@ int socket_send(Socket* sock, const netudp_address_t* dest,
     int result = sendto(sock->handle,
                         static_cast<const char*>(data), len, 0,
                         reinterpret_cast<const struct sockaddr*>(&ss), ss_len);
+
+#ifdef NETUDP_PLATFORM_WINDOWS
+    if (result == SOCKET_ERROR) {
+        return -1;
+    }
+#else
+    if (result < 0) {
+        return -1;
+    }
+#endif
+
+    return result;
+}
+
+int socket_send_raw(Socket* sock, const void* sa, int sa_len,
+                    const void* data, int len) {
+    NETUDP_ZONE("sock::send_raw");
+    if (sock == nullptr || sock->handle == NETUDP_INVALID_SOCKET) {
+        return -1;
+    }
+
+    int result = sendto(sock->handle,
+                        static_cast<const char*>(data), len, 0,
+                        static_cast<const struct sockaddr*>(sa), sa_len);
 
 #ifdef NETUDP_PLATFORM_WINDOWS
     if (result == SOCKET_ERROR) {

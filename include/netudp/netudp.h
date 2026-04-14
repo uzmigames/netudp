@@ -48,6 +48,7 @@ void netudp_client_update(netudp_client_t* client, double time);
 void netudp_client_disconnect(netudp_client_t* client);
 void netudp_client_destroy(netudp_client_t* client);
 int  netudp_client_state(const netudp_client_t* client);
+int  netudp_client_index(const netudp_client_t* client);
 
 /* --- Send --- */
 

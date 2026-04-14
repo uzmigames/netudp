@@ -71,10 +71,25 @@ int socket_create(Socket* out, const netudp_address_t* bind_addr,
                   int send_buf_size, int recv_buf_size, int flags = 0);
 
 /**
+ * Convert netudp_address_t to sockaddr_storage for use with socket_send_raw.
+ * Zeroes and populates the sockaddr struct. Call once, cache the result.
+ */
+void address_to_sockaddr(const netudp_address_t* addr,
+                          void* ss, int* ss_len);
+
+/**
  * Send datagram to address. Returns bytes sent or -1 on error.
  */
 int socket_send(Socket* sock, const netudp_address_t* dest,
                 const void* data, int len);
+
+/**
+ * Send datagram using a pre-built sockaddr (avoids per-send address_to_sockaddr).
+ * The caller must have already converted the address via address_to_sockaddr().
+ * Phase 38: eliminates 128-byte memset + field copy on every send for known peers.
+ */
+int socket_send_raw(Socket* sock, const void* sa, int sa_len,
+                    const void* data, int len);
 
 /**
  * Receive datagram. Returns bytes received, 0 if no data (non-blocking), -1 on error.

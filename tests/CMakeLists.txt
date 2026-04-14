@@ -39,6 +39,7 @@ add_executable(netudp_tests
     test_batch_io.cpp
     test_batch_api.cpp
     test_frame_coalescing.cpp
+    test_phase36_38.cpp
 )
 
 # Tests need access to internal src/ headers for SIMD dispatch testing

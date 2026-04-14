@@ -98,6 +98,12 @@ struct alignas(64) Connection {
     double   next_slow_tick = 0.0;  /* Amortized cleanup/stats (phase 34) */
     uint32_t timeout_seconds = 10;
     uint8_t  pending_mask = 0;      /* 1 bit per channel with pending sends (phase 33) */
+    uint16_t slot_id = 0xFFFF;     /* Slot index embedded in wire header (phase 36). 0xFFFF = unassigned. */
+
+    /* Cached sockaddr for zero-copy sends — avoids per-send memset(128) + field copy.
+     * Populated once in server_handle_connection_request, reused on every send. (phase 38) */
+    alignas(8) uint8_t cached_sa[128] = {};  /* sizeof(sockaddr_storage) on all platforms */
+    int cached_sa_len = 0;
 
     /* --- Convenience accessors (only valid when cdata != nullptr) --- */
     Channel& ch(int i)                   { return cdata->channels[i]; }
@@ -152,6 +158,9 @@ struct alignas(64) Connection {
         }
 
         congestion.reset();
+        std::memset(cached_sa, 0, sizeof(cached_sa));
+        cached_sa_len = 0;
+        slot_id = 0xFFFF;
         stats = ConnectionStats{};
         connect_time = 0.0;
         last_recv_time = 0.0;

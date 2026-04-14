@@ -349,15 +349,18 @@ static void connection_worker_fn(netudp_server* server, int worker_id) {
     }
 }
 
-/** Send a packet: either directly via socket or via send_queue in pipeline mode. */
+/** Send a packet: either directly via socket or via send_queue in pipeline mode.
+ *  cached_sa/cached_sa_len: pre-built sockaddr from Connection (phase 38).
+ *  In non-pipeline mode, skips address_to_sockaddr entirely. */
 static void server_send_packet(netudp_server* server,
                                 const netudp_address_t* dest,
+                                const uint8_t* cached_sa, int cached_sa_len,
                                 const uint8_t* data, int len) {
     NETUDP_ZONE("srv::send_pkt");
     if (server->pipeline_mode && server->send_queue != nullptr) {
         server->send_queue->push(dest, data, len);
     } else {
-        netudp::socket_send(&server->socket, dest, data, len);
+        netudp::socket_send_raw(&server->socket, cached_sa, cached_sa_len, data, len);
     }
 }
 
@@ -478,8 +481,17 @@ void netudp_server_start(netudp_server_t* server, int max_clients) {
     server->max_clients = max_clients;
     server->running = true;
 
-    server->connections = static_cast<netudp::Connection*>(
-        server->allocator.allocate(sizeof(netudp::Connection) * static_cast<size_t>(max_clients)));
+    /* Connection requires alignas(64) — use aligned allocation */
+    {
+        size_t conn_bytes = sizeof(netudp::Connection) * static_cast<size_t>(max_clients);
+#ifdef NETUDP_PLATFORM_WINDOWS
+        server->connections = static_cast<netudp::Connection*>(
+            _aligned_malloc(conn_bytes, alignof(netudp::Connection)));
+#else
+        server->connections = static_cast<netudp::Connection*>(
+            std::aligned_alloc(alignof(netudp::Connection), conn_bytes));
+#endif
+    }
     if (server->connections != nullptr) {
         for (int i = 0; i < max_clients; ++i) {
             new (&server->connections[i]) netudp::Connection();
@@ -562,7 +574,12 @@ void netudp_server_stop(netudp_server_t* server) {
         for (int i = 0; i < server->max_clients; ++i) {
             server->connections[i].reset();
         }
-        server->allocator.deallocate(server->connections);
+        /* Must match aligned allocation in server_start */
+#ifdef NETUDP_PLATFORM_WINDOWS
+        _aligned_free(server->connections);
+#else
+        std::free(server->connections);
+#endif
         server->connections = nullptr;
     }
     if (server->active_slots != nullptr) {
@@ -708,10 +725,27 @@ static void server_dispatch_packet(netudp_server* server,
         netudp::server_handle_connection_request(server, from, data, len);
     } else if ((packet_type >= 0x04 && packet_type <= 0x06) ||
                prefix == netudp::crypto::PACKET_PREFIX_DATA_REKEY) {
+        /* Phase 36: O(1) dispatch via slot_id embedded in packet header.
+         * Wire: [prefix(1)][slot_id(2)][ciphertext(N)]
+         * Minimum: prefix + slot_id + at least 1 byte ciphertext = 4 bytes. */
         int slot = -1;
-        const int* slot_ptr = server->address_to_slot.find(*from);
-        if (slot_ptr != nullptr) {
-            slot = *slot_ptr;
+        if (len >= 4) {
+            uint16_t wire_slot = 0;
+            std::memcpy(&wire_slot, data + 1, 2);
+            /* Validate: slot_id in range, connection active, address matches */
+            if (wire_slot < static_cast<uint16_t>(server->max_clients)) {
+                netudp::Connection& cand = server->connections[wire_slot];
+                if (cand.active && netudp_address_equal(&cand.address, from)) {
+                    slot = static_cast<int>(wire_slot);
+                }
+            }
+        }
+        /* Fallback: if slot_id invalid or address mismatch, use hash map */
+        if (slot < 0) {
+            const int* slot_ptr = server->address_to_slot.find(*from);
+            if (slot_ptr != nullptr) {
+                slot = *slot_ptr;
+            }
         }
         if (slot >= 0) {
             netudp::server_handle_data_packet(server, slot, data, len);
@@ -1229,6 +1263,10 @@ void server_handle_connection_request(netudp_server* server,
     Connection& conn = server->connections[slot];
     conn.active = true;
     conn.address = *from;
+    conn.slot_id = static_cast<uint16_t>(slot);
+
+    /* Cache pre-built sockaddr — eliminates per-send memset(128) + field copy (phase 38) */
+    netudp::address_to_sockaddr(from, conn.cached_sa, &conn.cached_sa_len);
 
     /* Register in O(1) address→slot map */
     server->address_to_slot.insert(*from, slot);
@@ -1255,8 +1293,36 @@ void server_handle_connection_request(netudp_server* server,
                                    slot, priv.client_id, priv.user_data);
     }
 
-    /* Send KEEPALIVE */
-    server_send_keepalive(server, slot);
+    /* Send connection-accepted keepalive with slot_id + max_clients (phase 36).
+     * The client reads this to learn its assigned slot_id for the wire header. */
+    {
+        Connection& c = server->connections[slot];
+        double now = server->current_time;
+
+        /* Payload: slot_id(u16) + max_clients(i32) + AckFields(8) = 14 bytes */
+        uint8_t payload[14];
+        uint16_t sid = static_cast<uint16_t>(slot);
+        std::memcpy(payload, &sid, 2);
+        int32_t mc = static_cast<int32_t>(server->max_clients);
+        std::memcpy(payload + 2, &mc, 4);
+        AckFields ack = c.packet_tracker.build_ack_fields(now);
+        write_ack_fields(ack, payload + 6);
+
+        c.packet_tracker.send_packet(now);
+
+        uint8_t prefix = 0x15; /* KEEPALIVE */
+        uint8_t ct[64];
+        int ct_len = crypto::packet_encrypt(&c.key_epoch, server->protocol_id, prefix,
+                                             payload, 14, ct);
+        if (ct_len > 0) {
+            server->send_buf[0] = prefix;
+            std::memcpy(server->send_buf + 1, ct, static_cast<size_t>(ct_len));
+            server_send_packet(server, &c.address, c.cached_sa, c.cached_sa_len,
+                               server->send_buf, 1 + ct_len);
+            c.last_send_time = now;
+            c.last_keepalive_time = now;
+        }
+    }
 }
 
 /* ======================================================================
@@ -1267,17 +1333,23 @@ void server_handle_data_packet(netudp_server* server, int slot,
     const uint8_t* packet, int packet_len) {
     NETUDP_ZONE("srv::data_packet");
     Connection& conn = server->connections[slot];
-    if (packet_len < 2) {
+    if (packet_len < 4) {  /* prefix(1) + slot_id(2) + at least 1 byte ciphertext */
         return;
     }
 
     uint8_t prefix = packet[0];
 
-    /* Decrypt: everything after prefix byte */
-    int header_len = 1;
+    /* Phase 36: header is now prefix(1) + slot_id(2) = 3 bytes */
+    int header_len = 3;
 
-    /* Nonce counter: next expected from this connection's replay window */
+    /* Nonce counter: next expected from this connection's replay window.
+     * Fix: when most_recent=0 and nonce 0 was never received, the first
+     * packet from this peer uses nonce 0 (not 1). */
     uint64_t expected_nonce = conn.key_epoch.replay.most_recent + 1;
+    if (conn.key_epoch.replay.most_recent == 0 &&
+        conn.key_epoch.replay.received[0] == crypto::ReplayProtection::EMPTY_SLOT) {
+        expected_nonce = 0;
+    }
 
     uint8_t plaintext[NETUDP_MAX_PACKET_ON_WIRE];
     int pt_len = crypto::packet_decrypt(
@@ -1523,7 +1595,7 @@ void server_send_pending(netudp_server* server, int slot) {
             server->send_buf[0] = prefix;
             std::memcpy(server->send_buf + 1, ct, static_cast<size_t>(ct_len));
             int total = 1 + ct_len;
-            server_send_packet(server, &conn.address, server->send_buf, total);
+            server_send_packet(server, &conn.address, conn.cached_sa, conn.cached_sa_len, server->send_buf, total);
             conn.last_send_time = now;
             conn.stats.on_packet_sent(total);
             conn.stats.frames_coalesced += static_cast<uint32_t>(frames_packed);
@@ -1588,7 +1660,7 @@ void server_send_pending(netudp_server* server, int slot) {
             server->send_buf[0] = prefix;
             std::memcpy(server->send_buf + 1, ct, static_cast<size_t>(ct_len));
             int total = 1 + ct_len;
-            server_send_packet(server, &conn.address, server->send_buf, total);
+            server_send_packet(server, &conn.address, conn.cached_sa, conn.cached_sa_len, server->send_buf, total);
             conn.last_send_time = now;
             conn.stats.on_packet_sent(total);
             conn.stats.frames_coalesced += static_cast<uint32_t>(frames_packed);
@@ -1625,7 +1697,7 @@ void server_send_keepalive(netudp_server* server, int slot) {
 
     server->send_buf[0] = prefix;
     std::memcpy(server->send_buf + 1, ct, static_cast<size_t>(ct_len));
-    server_send_packet(server, &conn.address, server->send_buf, 1 + ct_len);
+    server_send_packet(server, &conn.address, conn.cached_sa, conn.cached_sa_len, server->send_buf, 1 + ct_len);
     conn.last_send_time = now;
     conn.last_keepalive_time = now;
 }

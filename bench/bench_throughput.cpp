@@ -31,6 +31,8 @@ static const uint8_t kThrKey[32] = {
     0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8,
 };
 
+static uint8_t g_crypto_mode = 0; /* 0=AUTO (AES-GCM if AES-NI), 1=AES-GCM, 2=XChaCha20 */
+
 static BenchResult run_throughput(const BenchConfig& cfg,
                                    int num_clients, int msgs_per_tick,
                                    int num_io_threads, int port_offset) {
@@ -55,6 +57,7 @@ static BenchResult run_throughput(const BenchConfig& cfg,
     srv_cfg.channels[0].type = NETUDP_CHANNEL_UNRELIABLE;
     srv_cfg.channels[1].type = NETUDP_CHANNEL_RELIABLE_ORDERED;
     srv_cfg.num_io_threads = num_io_threads;
+    srv_cfg.crypto_mode = g_crypto_mode;
 
     double sim_time = 10000.0;
     netudp_server_t* server = netudp_server_create(srv_addr, &srv_cfg, sim_time);

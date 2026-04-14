@@ -98,9 +98,9 @@ typedef void (*netudp_packet_handler_fn)(void* ctx, int client_index,
 /* --- Crypto mode --- */
 
 typedef enum {
-    NETUDP_CRYPTO_XCHACHA20 = 0, /**< XChaCha20-Poly1305 (nonce-misuse resistant, software) */
-    NETUDP_CRYPTO_AES_GCM   = 1, /**< AES-256-GCM (requires AES-NI, ~7x faster with cached handles) */
-    NETUDP_CRYPTO_AUTO      = 2  /**< Auto-detect: AES-GCM if AES-NI available, else XChaCha20 (default) */
+    NETUDP_CRYPTO_AUTO      = 0, /**< Auto-detect: AES-GCM if AES-NI available, else XChaCha20 (default) */
+    NETUDP_CRYPTO_AES_GCM   = 1, /**< AES-256-GCM (requires AES-NI, ~4x faster with cached BCrypt handles) */
+    NETUDP_CRYPTO_XCHACHA20 = 2  /**< XChaCha20-Poly1305 (nonce-misuse resistant, software fallback) */
 } netudp_crypto_mode_t;
 
 /* --- Channel config --- */
@@ -150,7 +150,7 @@ typedef struct netudp_server_config {
     const void* sim_config; /* NetSimConfig*, NULL = disabled */
 
     /* Crypto mode */
-    uint8_t crypto_mode; /**< netudp_crypto_mode_t. Default: NETUDP_CRYPTO_XCHACHA20. */
+    uint8_t crypto_mode; /**< netudp_crypto_mode_t. Default: NETUDP_CRYPTO_AUTO (AES-GCM if AES-NI, else XChaCha20). */
 
     /* Threading (Linux only — SO_REUSEPORT multi-thread I/O) */
     int num_io_threads; /**< Number of I/O threads. 0 or 1 = single-threaded (default). */

@@ -30,7 +30,7 @@
 #define NETUDP_MAX_MESSAGE_SIZE      (288 * 1024) /* 288 KB */
 
 /* Version info for wire protocol (13 bytes, null-terminated) */
-#define NETUDP_VERSION_INFO "NETUDP 1.00\0"
+#define NETUDP_VERSION_INFO "NETUDP 1.01\0"
 #define NETUDP_VERSION_INFO_BYTES 13
 
 #endif /* NETUDP_CONFIG_H */

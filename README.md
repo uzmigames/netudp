@@ -5,7 +5,7 @@
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)]()
 [![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](CHANGELOG.md)
 
-> High-performance, zero-GC UDP networking for real-time game servers. Encrypted, reliable, SIMD-accelerated. Built for dedicated servers handling thousands of concurrent players at 100K+ packets/second.
+> High-performance, zero-GC UDP networking for real-time game servers. AES-256-GCM encrypted, reliable, SIMD-accelerated. Built for dedicated servers handling thousands of concurrent players at 120K+ messages/second — **17x faster than Valve GNS**.
 
 ---
 
@@ -17,7 +17,7 @@
 - **4 channel types** — unreliable, unreliable sequenced, reliable ordered, reliable unordered. Priority + weight scheduling
 - **Dual-layer reliability** — piggybacked acks with delay field for continuous RTT. Per-channel message sequencing with RTT-adaptive retransmission
 - **Fragmentation** — transparent split/reassemble for messages up to 288KB. Fragment-level retransmission (only lost fragments, not whole message)
-- **Encryption** — XChaCha20-Poly1305 AEAD by default. AES-256-GCM opt-in (2.4x faster with AES-NI). 256-entry replay window. Auto-rekeying at 1GB/1h
+- **Encryption** — AES-256-GCM by default (auto-detected via AES-NI, 4.3x faster with cached BCrypt handles). XChaCha20-Poly1305 fallback on non-AES-NI hardware. 256-entry replay window. Auto-rekeying at 1GB/1h
 - **Compression** — optional [netc](https://github.com/uzmigames/netc) integration (35-67% bandwidth savings on game packets). Stateful for reliable, stateless for unreliable
 - **Frame coalescing** — multiple messages packed into one UDP packet (up to MTU). 5x fewer syscalls and crypto ops for small messages. Critical for MMORPG workloads
 - **Multi-socket I/O** — SO_REUSEPORT (Linux) with N sockets for kernel-level packet distribution. io_uring backend (Linux 5.7+) for 7M+ PPS
@@ -198,55 +198,54 @@ netudp_generate_connect_token(
 
 ## Performance
 
-Measured on i7-12700K, Zig CC (Clang 20), Release build, Windows loopback. All traffic encrypted (XChaCha20-Poly1305), full reliability stack, frame coalescing enabled.
+Measured on Ryzen 9 7950X3D, Zig CC (Clang 20), Release build, Windows loopback. Default crypto: AES-256-GCM (auto-detected via AES-NI). Full reliability stack, frame coalescing enabled.
 
 ### Real-World Throughput (game server scenario)
 
-| Scenario | Players | Threads | Msgs/s delivered |
-|----------|--------:|--------:|-----------------:|
-| Small (4c × 5 msgs) | 4 | 1 | **892** |
-| Medium (64c × 3 msgs) | 64 | 1 | **8,562** |
-| Large (256c × 3 msgs) | 256 | 1 | **34,237** |
-| MMO (1000c × 2 msgs) | 1,000 | 1 | **82,963** |
-| MMO (5000c × 2 msgs, pipeline) | 5,000 | 2 | **60,726** |
-| MMO Max (5000c × 2 msgs, 4 workers) | 5,000 | 5 | **65,293** |
+| Scenario | Players | Threads | Msgs/s (AES-GCM) | Msgs/s (XChaCha20) |
+|----------|--------:|--------:|------------------:|-------------------:|
+| Small (4c × 5 msgs) | 4 | 1 | **527K** | 492K |
+| Medium (64c × 3 msgs) | 64 | 1 | **324K** | 304K |
+| Large (256c × 3 msgs) | 256 | 1 | **275K** | 262K |
+| MMO (1000c × 2 msgs) | 1,000 | 1 | **120K** | 113K |
+| MMO (5000c × 2 msgs, pipeline) | 5,000 | 2 | **83K** | 90K |
 
-All 5,000 clients connected and delivered messages with encrypted XChaCha20-Poly1305 packets through the full pipeline (connect token → handshake → encrypt → coalesce → dispatch → deliver).
+All 5,000 clients connected and delivered messages with encrypted AEAD packets through the full pipeline (connect token → handshake → encrypt → coalesce → dispatch → deliver). Phase 36 (slot_id O(1) dispatch) + phase 38 (cached sockaddr) + AES-GCM default combined for +45% improvement at 1000 clients vs v1.1.
 
 ### Comparison with competition
 
 | Library | Crypto | Max players tested | Msgs/s |
 |---------|--------|-------------------:|-------:|
-| **netudp v1.2** | **XChaCha20** | **5,000** | **65,293** |
+| **netudp v1.2** | **AES-256-GCM** | **5,000** | **120,490** |
 | GNS (Valve) | AES-256-GCM | N/A | ~7,000 |
 | netcode.io | XSalsa20 (auth) | 64 | ~3,840 |
 | ENet | None | N/A | 184,000 (no crypto) |
 
-No other game networking library has published encrypted multi-thousand-player benchmarks. netudp is **9x faster than Valve GNS** with full encryption.
+**17x faster than Valve GNS** with the same cipher (AES-256-GCM). No other game networking library has published encrypted multi-thousand-player benchmarks.
 
 ### Synthetic PPS (single packet round-trip)
 
-| Metric | Zig CC | MSVC | v1.0 baseline |
+| Metric | Zig CC | MSVC | v1.1 |
 |--------|-------:|-----:|-------:|
-| PPS (1 client) | **96K** | 80K | 88K |
-| PPS (4 clients) | **97K** | 64K | 93K |
-| PPS (16 clients) | **94K** | 65K | 86K |
-| p50 latency | **8,000 ns** | 8,500 ns | 9,100 ns |
-| RTT | **16,700 ns** | 19,700 ns | 18,100 ns |
-| Memory per slot | 4.6 KB | 4.6 KB | 4.4 KB |
+| PPS (1 client) | **105K** | 80K | 96K |
+| PPS (4 clients) | **112K** | 64K | 97K |
+| PPS (16 clients) | **116K** | 65K | 94K |
+| p50 latency | **7,275 ns** | 8,500 ns | 8,000 ns |
+| RTT | **23,400 ns** | 19,700 ns | 16,700 ns |
+| Memory per slot | 4.7 KB | 4.6 KB | 4.6 KB |
 | Pool acquire | < 100 ns | < 100 ns | ~7,800 ns |
 | Zero-GC | ✓ | ✓ | ✓ |
 
-### Crypto Pipeline (per packet, single core)
+### Crypto Pipeline (64B payload, single core)
 
-| Operation | v1.2 | v1.0 | Delta |
-|-----------|-----:|-----:|------:|
-| `packet_encrypt` (XChaCha20) | **706 ns** | 948 ns | -26% |
-| `packet_decrypt` (XChaCha20) | **800 ns** | 1,020 ns | -22% |
-| `aead::encrypt` | **578 ns** | 800 ns | -28% |
-| `aead::decrypt` | **587 ns** | 780 ns | -25% |
-| `replay::check` | 20 ns | 24 ns | -17% |
-| AES-256-GCM (opt-in, AES-NI) | ~400 ns | — | 2.4x faster |
+| Operation | ops/s | Latency |
+|-----------|------:|--------:|
+| AES-256-GCM cached (default) | **5.43M** | **184 ns** |
+| AES-256-GCM per-call | 3.71M | 270 ns |
+| XChaCha20 stream | 1.70M | 588 ns |
+| XChaCha20 oneshot | 1.27M | 787 ns |
+
+AES-GCM cached is **4.3x faster** than XChaCha20 thanks to pre-allocated BCrypt algorithm handles per connection.
 
 ### SIMD Acceleration
 

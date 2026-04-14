@@ -43,6 +43,7 @@ struct netudp_client {
 
     int     client_index = -1;
     int     max_clients = 0;
+    uint16_t server_slot_id = 0xFFFF; /* Assigned by server in connection-accepted keepalive (phase 36) */
 
     double  connect_start_time = 0.0;
     double  last_send_time = 0.0;
@@ -220,8 +221,10 @@ void netudp_client_update(netudp_client_t* client, double time) {
                 &client->conn.key_epoch, client->protocol_id, prefix, payload, 8, ct);
             if (ct_len > 0) {
                 client->send_buf[0] = prefix;
-                std::memcpy(client->send_buf + 1, ct, static_cast<size_t>(ct_len));
-                netudp::socket_send_connected(&client->socket, client->send_buf, 1 + ct_len);
+                /* Phase 36: embed slot_id after prefix */
+                std::memcpy(client->send_buf + 1, &client->server_slot_id, 2);
+                std::memcpy(client->send_buf + 3, ct, static_cast<size_t>(ct_len));
+                netudp::socket_send_connected(&client->socket, client->send_buf, 3 + ct_len);
                 client->conn.last_send_time = time;
             }
         }
@@ -253,16 +256,23 @@ void netudp_client_update(netudp_client_t* client, double time) {
         uint8_t packet_type = prefix & 0x0F;
 
         if (packet_type == 0x05 && client->state == netudp::ClientState::SENDING_REQUEST) {
-            /* KEEPALIVE — connection accepted */
+            /* KEEPALIVE — connection accepted (phase 36: slot_id(u16) + max_clients(i32) + AckFields(8) = 14 bytes) */
             int header_len = 1;
             uint8_t payload[64] = {};
             int pt_len = netudp::crypto::packet_decrypt(
                 &client->conn.key_epoch, client->protocol_id, prefix,
                 0, client->recv_buf + header_len, received - header_len, payload);
 
-            if (pt_len >= 8) {
-                std::memcpy(&client->client_index, payload, 4);
-                std::memcpy(&client->max_clients, payload + 4, 4);
+            if (pt_len >= 14) {
+                /* Phase 36 format: slot_id(u16) + max_clients(i32) + AckFields(8) */
+                uint16_t sid = 0;
+                std::memcpy(&sid, payload, 2);
+                int32_t mc = 0;
+                std::memcpy(&mc, payload + 2, 4);
+                client->server_slot_id = sid;
+                client->client_index = static_cast<int>(sid);
+                client->max_clients = static_cast<int>(mc);
+                client->conn.slot_id = sid;
                 client->state = netudp::ClientState::CONNECTED;
                 client->conn.last_recv_time = time;
                 client->conn.active = true;
@@ -301,6 +311,13 @@ int netudp_client_state(const netudp_client_t* client) {
         return 0;
     }
     return static_cast<int>(client->state);
+}
+
+int netudp_client_index(const netudp_client_t* client) {
+    if (client == nullptr) {
+        return -1;
+    }
+    return client->client_index;
 }
 
 int netudp_client_send(netudp_client_t* client,
@@ -435,8 +452,10 @@ void client_send_pending(netudp_client* client) {
             }
 
             client->send_buf[0] = prefix;
-            std::memcpy(client->send_buf + 1, ct, static_cast<size_t>(ct_len));
-            int total = 1 + ct_len;
+            /* Phase 36: embed slot_id after prefix for O(1) server dispatch */
+            std::memcpy(client->send_buf + 1, &client->server_slot_id, 2);
+            std::memcpy(client->send_buf + 3, ct, static_cast<size_t>(ct_len));
+            int total = 3 + ct_len;
             socket_send_connected(&client->socket, client->send_buf, total);
             conn.last_send_time = now;
             conn.stats.on_packet_sent(total);
@@ -488,8 +507,10 @@ void client_send_pending(netudp_client* client) {
                                              payload, payload_pos, ct);
         if (ct_len >= 0) {
             client->send_buf[0] = prefix;
-            std::memcpy(client->send_buf + 1, ct, static_cast<size_t>(ct_len));
-            int total = 1 + ct_len;
+            /* Phase 36: embed slot_id after prefix for O(1) server dispatch */
+            std::memcpy(client->send_buf + 1, &client->server_slot_id, 2);
+            std::memcpy(client->send_buf + 3, ct, static_cast<size_t>(ct_len));
+            int total = 3 + ct_len;
             socket_send_connected(&client->socket, client->send_buf, total);
             conn.last_send_time = now;
             conn.stats.on_packet_sent(total);
