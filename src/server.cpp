@@ -1951,7 +1951,7 @@ void server_handle_data_packet(netudp_server* server, int slot,
                     conn.rs(ch).deliver_ordered(
                         [&](const uint8_t* data, int len, uint16_t seq) {
                             DeliveredMessage dmsg;
-                            int copy_len = std::min(len, static_cast<int>(NETUDP_MTU));
+                            int copy_len = (std::min)(len, static_cast<int>(NETUDP_MTU));
                             std::memcpy(dmsg.data, data, static_cast<size_t>(copy_len));
                             dmsg.size = copy_len;
                             dmsg.channel = ch;
@@ -1965,7 +1965,7 @@ void server_handle_data_packet(netudp_server* server, int slot,
                 if (!conn.rs(ch).is_received_unordered(msg_seq)) {
                     conn.rs(ch).mark_received_unordered(msg_seq);
                     DeliveredMessage dmsg;
-                    int copy_len = std::min(static_cast<int>(msg_len), static_cast<int>(NETUDP_MTU));
+                    int copy_len = (std::min)(static_cast<int>(msg_len), static_cast<int>(NETUDP_MTU));
                     std::memcpy(dmsg.data, plaintext + pos, static_cast<size_t>(copy_len));
                     dmsg.size = copy_len;
                     dmsg.channel = ch;
@@ -1996,7 +1996,7 @@ void server_handle_data_packet(netudp_server* server, int slot,
             );
             if (complete != nullptr && out_size > 0) {
                 DeliveredMessage dmsg;
-                int copy_len = std::min(out_size, static_cast<int>(NETUDP_MTU));
+                int copy_len = (std::min)(out_size, static_cast<int>(NETUDP_MTU));
                 std::memcpy(dmsg.data, complete, static_cast<size_t>(copy_len));
                 dmsg.size = copy_len;
                 dmsg.channel = ch;

@@ -8,15 +8,20 @@ on:
 
 jobs:
   bench:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     name: Benchmark regression check
 
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install GCC 12
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y gcc-12 g++-12
+
       - name: Configure (Release + bench enabled)
         run: |
-          cmake -B build_bench \
+          cmake -B build/bench_ci \
             -DCMAKE_BUILD_TYPE=Release \
             -DNETUDP_BUILD_BENCH=ON \
             -DNETUDP_BUILD_TESTS=OFF \
@@ -24,7 +29,7 @@ jobs:
             -DCMAKE_CXX_COMPILER=g++-12
 
       - name: Build
-        run: cmake --build build_bench --config Release -j 4
+        run: cmake --build build/bench_ci --config Release -j 4
 
       - name: Restore baseline
         id: cache-baseline
@@ -35,12 +40,12 @@ jobs:
 
       - name: Run benchmarks (pps + latency)
         run: |
-          build_bench/bench/netudp_bench \
+          build/bench_ci/bench/netudp_bench \
             --bench pps \
             --warmup 2 \
             --runs 20 \
             --json bench_results_pps.json
-          build_bench/bench/netudp_bench \
+          build/bench_ci/bench/netudp_bench \
             --bench latency \
             --warmup 2 \
             --runs 100 \

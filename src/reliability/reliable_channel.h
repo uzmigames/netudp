@@ -107,7 +107,7 @@ public:
                 continue;
             }
 
-            double effective_rto = rto * (1 << std::min(msg.retry_count, 5));
+            double effective_rto = rto * (1 << (std::min)(msg.retry_count, 5));
             if (now - msg.send_time >= effective_rto) {
                 if (msg.retry_count >= MAX_RETRIES) {
                     msg.valid = false; /* Drop after max retries */
@@ -141,8 +141,8 @@ public:
 
         ReceivedMessage& rmsg = recv_buffer_[idx];
         rmsg.sequence = msg_seq;
-        std::memcpy(rmsg.data, data, static_cast<size_t>(std::min(len, 1200)));
-        rmsg.data_len = std::min(len, 1200);
+        std::memcpy(rmsg.data, data, static_cast<size_t>((std::min)(len, 1200)));
+        rmsg.data_len = (std::min)(len, 1200);
         rmsg.valid = true;
 
         return true;

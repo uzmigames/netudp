@@ -30,7 +30,7 @@ struct BandwidthBucket {
         double elapsed = now - last_refill_time;
         if (elapsed > 0.0) {
             tokens += static_cast<double>(rate_bytes_per_sec) * elapsed;
-            tokens = std::min(tokens, static_cast<double>(burst_bytes));
+            tokens = (std::min)(tokens, static_cast<double>(burst_bytes));
             last_refill_time = now;
         }
     }

@@ -608,7 +608,7 @@ void client_handle_data_packet(netudp_client* client, const uint8_t* packet, int
                     conn.rs(ch).deliver_ordered(
                         [&](const uint8_t* data, int len, uint16_t seq) {
                             DeliveredMessage dm;
-                            int copy_len = std::min(len, static_cast<int>(NETUDP_MTU));
+                            int copy_len = (std::min)(len, static_cast<int>(NETUDP_MTU));
                             std::memcpy(dm.data, data, static_cast<size_t>(copy_len));
                             dm.size = copy_len;
                             dm.channel = ch;
@@ -622,7 +622,7 @@ void client_handle_data_packet(netudp_client* client, const uint8_t* packet, int
                 if (!conn.rs(ch).is_received_unordered(msg_seq)) {
                     conn.rs(ch).mark_received_unordered(msg_seq);
                     DeliveredMessage dm;
-                    int copy_len = std::min(static_cast<int>(msg_len), static_cast<int>(NETUDP_MTU));
+                    int copy_len = (std::min)(static_cast<int>(msg_len), static_cast<int>(NETUDP_MTU));
                     std::memcpy(dm.data, plaintext + pos, static_cast<size_t>(copy_len));
                     dm.size = copy_len;
                     dm.channel = ch;

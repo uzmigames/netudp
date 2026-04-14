@@ -5,6 +5,7 @@
 
 #ifdef __linux__
 #include <sys/socket.h>
+#include <netinet/udp.h>
 #endif
 
 namespace netudp {
@@ -140,6 +141,10 @@ int socket_create(Socket* out, const netudp_address_t* bind_addr,
      */
 
     (void)flags;
+#endif
+
+#if !defined(__linux__) && !defined(NETUDP_PLATFORM_WINDOWS)
+    (void)flags; /* macOS: no SO_REUSEPORT, no SIO_UDP_CONNRESET */
 #endif
 
     setsockopt(sock, SOL_SOCKET, SO_SNDBUF,
