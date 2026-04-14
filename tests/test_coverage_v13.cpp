@@ -440,6 +440,41 @@ TEST_F(ApiCoverageTest, ClientIndexNull) {
     EXPECT_EQ(netudp_client_index(nullptr), -1);
 }
 
+TEST_F(ApiCoverageTest, PacingSlicesConfig) {
+    /* Verify pacing_slices is accepted and server runs correctly with pacing enabled */
+    netudp_server_config_t cfg = {};
+    cfg.protocol_id = 0xAABB;
+    cfg.pacing_slices = 4; /* 4 slices per tick */
+    netudp_server_t* s = netudp_server_create("127.0.0.1:29954", &cfg, 0.0);
+    ASSERT_NE(s, nullptr);
+    netudp_server_start(s, 8);
+
+    /* Update 10 ticks — should not crash with pacing enabled (no active connections) */
+    for (int i = 0; i < 10; ++i) {
+        netudp_server_update(s, static_cast<double>(i) * 0.016);
+    }
+
+    netudp_server_stop(s);
+    netudp_server_destroy(s);
+}
+
+TEST_F(ApiCoverageTest, PacingZeroBurstMode) {
+    /* pacing_slices = 0 should behave as burst mode (default) */
+    netudp_server_config_t cfg = {};
+    cfg.protocol_id = 0xCCDD;
+    cfg.pacing_slices = 0;
+    netudp_server_t* s = netudp_server_create("127.0.0.1:29955", &cfg, 0.0);
+    ASSERT_NE(s, nullptr);
+    netudp_server_start(s, 8);
+
+    for (int i = 0; i < 10; ++i) {
+        netudp_server_update(s, static_cast<double>(i) * 0.016);
+    }
+
+    netudp_server_stop(s);
+    netudp_server_destroy(s);
+}
+
 TEST_F(ApiCoverageTest, SchemaEntityLimits) {
     netudp_server_config_t cfg = {};
     cfg.protocol_id = 0x9999;
