@@ -61,6 +61,18 @@ int aesgcm_decrypt(const uint8_t key[32], const uint8_t nonce[24],
                     const uint8_t* ct, int ct_len,
                     uint8_t* pt);
 
+/* XOR obfuscation (defined in aead_dispatch.cpp) — same signature as AEAD for dispatch.
+ * Output size = input size (no MAC tag). */
+int xor_encrypt(const uint8_t key[32], const uint8_t nonce[24],
+                const uint8_t* aad, int aad_len,
+                const uint8_t* pt, int pt_len,
+                uint8_t* ct);
+
+int xor_decrypt(const uint8_t key[32], const uint8_t nonce[24],
+                const uint8_t* aad, int aad_len,
+                const uint8_t* ct, int ct_len,
+                uint8_t* pt);
+
 } // namespace netudp::crypto
 
 #endif /* NETUDP_AEAD_DISPATCH_H */

@@ -8,6 +8,7 @@ add_executable(netudp_bench
     bench_coalescing.cpp
     bench_throughput.cpp
     bench_crypto.cpp
+    bench_pvp_sim.cpp
 )
 
 target_include_directories(netudp_bench PRIVATE

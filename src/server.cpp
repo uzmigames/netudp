@@ -213,6 +213,15 @@ struct netudp_server {
     int* group_member_pool = nullptr;   /* max_groups * max_clients ints for members */
     int* group_slot_pool = nullptr;     /* max_groups * max_clients ints for slot_to_pos */
 
+    /* Heartbeat / Integrity (phase 45) */
+    double heartbeat_interval = 5.0;    /* Ping interval in seconds */
+    double integrity_interval = 30.0;   /* Challenge interval in seconds */
+    double integrity_timeout = 120.0;   /* Max response time */
+    const int16_t* integrity_keys = nullptr;
+    int integrity_key_count = 0;
+    double last_heartbeat_tick = 0.0;
+    double last_integrity_tick = 0.0;
+
     /* Packet pacing (phase 44) */
     int pacing_slices = 0;          /* 0 = burst (default), >0 = N slices per tick */
     int pacing_current_slice = 0;   /* Current slice being sent this tick */
@@ -564,6 +573,18 @@ void netudp_server_start(netudp_server_t* server, int max_clients) {
         size_t slot_ints = static_cast<size_t>(mg) * static_cast<size_t>(max_clients);
         server->group_slot_pool = new (std::nothrow) int[slot_ints];
     }
+
+    /* Heartbeat / Integrity (phase 45) */
+    server->heartbeat_interval = (server->config.heartbeat_interval_ms > 0)
+        ? static_cast<double>(server->config.heartbeat_interval_ms) / 1000.0 : 5.0;
+    server->integrity_interval = (server->config.integrity_interval_ms > 0)
+        ? static_cast<double>(server->config.integrity_interval_ms) / 1000.0 : 30.0;
+    server->integrity_timeout = (server->config.integrity_timeout_ms > 0)
+        ? static_cast<double>(server->config.integrity_timeout_ms) / 1000.0 : 120.0;
+    server->integrity_keys = server->config.integrity_keys;
+    server->integrity_key_count = server->config.integrity_key_count;
+    server->last_heartbeat_tick = server->current_time;
+    server->last_integrity_tick = server->current_time;
 
     /* Packet pacing (phase 44) */
     server->pacing_slices = server->config.pacing_slices;

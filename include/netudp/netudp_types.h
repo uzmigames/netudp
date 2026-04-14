@@ -99,9 +99,12 @@ typedef void (*netudp_packet_handler_fn)(void* ctx, int client_index,
 /* --- Crypto mode --- */
 
 typedef enum {
-    NETUDP_CRYPTO_AUTO      = 0, /**< Auto-detect: AES-GCM if AES-NI available, else XChaCha20 (default) */
-    NETUDP_CRYPTO_AES_GCM   = 1, /**< AES-256-GCM (requires AES-NI, ~4x faster with cached BCrypt handles) */
-    NETUDP_CRYPTO_XCHACHA20 = 2  /**< XChaCha20-Poly1305 (nonce-misuse resistant, software fallback) */
+    NETUDP_CRYPTO_NONE      = 0, /**< No encryption (default). Fastest. Use for trusted networks or with app-level auth. */
+    NETUDP_CRYPTO_XOR       = 1, /**< XOR obfuscation with key from connect token. Zero overhead, no MAC tag.
+                                      Same as most production MMOs. NOT cryptographically secure. */
+    NETUDP_CRYPTO_AES_GCM   = 2, /**< AES-256-GCM (requires AES-NI, ~4x faster with cached BCrypt handles) */
+    NETUDP_CRYPTO_XCHACHA20 = 3, /**< XChaCha20-Poly1305 (nonce-misuse resistant, software fallback) */
+    NETUDP_CRYPTO_AUTO      = 4  /**< Auto-detect: AES-GCM if AES-NI available, else XChaCha20 */
 } netudp_crypto_mode_t;
 
 /* --- Channel config --- */
@@ -152,6 +155,13 @@ typedef struct netudp_server_config {
 
     /* Crypto mode */
     uint8_t crypto_mode; /**< netudp_crypto_mode_t. Default: NETUDP_CRYPTO_AUTO (AES-GCM if AES-NI, else XChaCha20). */
+
+    /* Heartbeat / Integrity (phase 45) */
+    int heartbeat_interval_ms;   /**< Ping interval in ms. 0 = default (5000). */
+    int integrity_interval_ms;   /**< Integrity challenge interval in ms. 0 = default (30000). */
+    int integrity_timeout_ms;    /**< Max time to respond to integrity check. 0 = default (120000). */
+    const int16_t* integrity_keys; /**< Key table for integrity checks. NULL = disabled. */
+    int integrity_key_count;     /**< Number of keys in table (typically 2048). */
 
     /* Multicast groups (phase 40) */
     int max_groups; /**< Max simultaneous groups. 0 = default (256). */

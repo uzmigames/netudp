@@ -100,6 +100,15 @@ struct alignas(64) Connection {
     uint8_t  pending_mask = 0;      /* 1 bit per channel with pending sends (phase 33) */
     uint16_t slot_id = 0xFFFF;     /* Slot index embedded in wire header (phase 36). 0xFFFF = unassigned. */
 
+    /* Heartbeat / Integrity (phase 45) */
+    double   last_ping_time = 0.0;
+    double   last_pong_time = 0.0;
+    double   timeout_left = 30.0;       /* Disconnect if no pong within this time */
+    double   integrity_timeout = 120.0; /* Disconnect if no valid integrity response */
+    double   last_integrity_time = 0.0;
+    uint16_t integrity_check_index = 0; /* Current challenge index into key table */
+    bool     integrity_pending = false; /* True when waiting for client response */
+
     /* Cached sockaddr for zero-copy sends — avoids per-send memset(128) + field copy.
      * Populated once in server_handle_connection_request, reused on every send. (phase 38) */
     alignas(8) uint8_t cached_sa[128] = {};  /* sizeof(sockaddr_storage) on all platforms */
@@ -158,6 +167,13 @@ struct alignas(64) Connection {
         }
 
         congestion.reset();
+        last_ping_time = 0.0;
+        last_pong_time = 0.0;
+        timeout_left = 30.0;
+        integrity_timeout = 120.0;
+        last_integrity_time = 0.0;
+        integrity_check_index = 0;
+        integrity_pending = false;
         std::memset(cached_sa, 0, sizeof(cached_sa));
         cached_sa_len = 0;
         slot_id = 0xFFFF;

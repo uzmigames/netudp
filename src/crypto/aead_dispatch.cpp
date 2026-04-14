@@ -59,8 +59,48 @@ static void select_xchacha20() {
     NLOG_INFO("[netudp] crypto: XChaCha20-Poly1305 selected");
 }
 
+/* ---- XOR obfuscation (NETUDP_CRYPTO_XOR) ---- */
+
+int xor_encrypt(const uint8_t key[32], const uint8_t /*nonce*/[24],
+                const uint8_t* /*aad*/, int /*aad_len*/,
+                const uint8_t* pt, int pt_len,
+                uint8_t* ct) {
+    for (int i = 0; i < pt_len; ++i) {
+        ct[i] = pt[i] ^ key[i & 31]; /* Repeat 32-byte key */
+    }
+    return pt_len; /* No MAC tag — output size = input size */
+}
+
+int xor_decrypt(const uint8_t key[32], const uint8_t /*nonce*/[24],
+                const uint8_t* /*aad*/, int /*aad_len*/,
+                const uint8_t* ct, int ct_len,
+                uint8_t* pt) {
+    for (int i = 0; i < ct_len; ++i) {
+        pt[i] = ct[i] ^ key[i & 31];
+    }
+    return ct_len; /* No MAC tag — output size = input size */
+}
+
+static int none_encrypt(const uint8_t /*key*/[32], const uint8_t /*nonce*/[24],
+                        const uint8_t* /*aad*/, int /*aad_len*/,
+                        const uint8_t* pt, int pt_len, uint8_t* ct) {
+    std::memcpy(ct, pt, static_cast<size_t>(pt_len));
+    return pt_len;
+}
+
+static int none_decrypt(const uint8_t /*key*/[32], const uint8_t /*nonce*/[24],
+                        const uint8_t* /*aad*/, int /*aad_len*/,
+                        const uint8_t* ct, int ct_len, uint8_t* pt) {
+    std::memcpy(pt, ct, static_cast<size_t>(ct_len));
+    return ct_len;
+}
+
 void aead_dispatch_init(int mode) {
-    if (mode == NETUDP_CRYPTO_AES_GCM) {
+    if (mode == NETUDP_CRYPTO_NONE) {
+        g_aead_encrypt = none_encrypt;
+        g_aead_decrypt = none_decrypt;
+        NLOG_INFO("[netudp] crypto: NONE (plaintext, no encryption)");
+    } else if (mode == NETUDP_CRYPTO_AES_GCM) {
         if (!try_select_aesgcm()) {
             select_xchacha20();
         }
@@ -69,6 +109,10 @@ void aead_dispatch_init(int mode) {
         if (!try_select_aesgcm()) {
             select_xchacha20();
         }
+    } else if (mode == NETUDP_CRYPTO_XOR) {
+        g_aead_encrypt = xor_encrypt;
+        g_aead_decrypt = xor_decrypt;
+        NLOG_INFO("[netudp] crypto: XOR obfuscation selected (no MAC, MMO mode)");
     } else {
         /* NETUDP_CRYPTO_XCHACHA20 or unknown — explicit XChaCha20 */
         select_xchacha20();

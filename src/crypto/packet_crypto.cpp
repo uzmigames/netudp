@@ -124,7 +124,7 @@ int packet_decrypt_grace(KeyEpoch* epoch, uint64_t protocol_id, uint8_t prefix_b
                          uint64_t nonce_counter, const uint8_t* ct, int ct_len,
                          uint8_t* pt) {
     NETUDP_ZONE("crypto::decrypt_grace");
-    if (epoch == nullptr || ct == nullptr || pt == nullptr || ct_len < 16) {
+    if (epoch == nullptr || ct == nullptr || pt == nullptr || ct_len < 1) {
         return -1;
     }
     if (epoch->grace_packets_remaining <= 0) {
@@ -180,7 +180,7 @@ int packet_encrypt(KeyEpoch* epoch, uint64_t protocol_id, uint8_t prefix_byte,
 int packet_decrypt(KeyEpoch* epoch, uint64_t protocol_id, uint8_t prefix_byte,
                    uint64_t nonce_counter, const uint8_t* ct, int ct_len, uint8_t* pt) {
     NETUDP_ZONE("crypto::packet_decrypt");
-    if (epoch == nullptr || ct == nullptr || pt == nullptr || ct_len < 16) {
+    if (epoch == nullptr || ct == nullptr || pt == nullptr || ct_len < 1) {
         return -1;
     }
 
