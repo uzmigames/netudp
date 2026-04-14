@@ -12,6 +12,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# Detect x86 architecture (ARM64 has no SSE/AVX)
+set(NETUDP_IS_X86 FALSE)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|i[3-6]86")
+    set(NETUDP_IS_X86 TRUE)
+endif()
+
 # Options
 option(NETUDP_BUILD_TESTS "Build test suite" ON)
 option(NETUDP_BUILD_BENCH "Build benchmarks" OFF)
@@ -134,7 +140,7 @@ if(NETUDP_BUILD_SHARED)
         $<$<BOOL:${WIN32}>:NOMINMAX>
         $<$<BOOL:${WIN32}>:_CRT_SECURE_NO_WARNINGS>
     )
-    if(NOT MSVC)
+    if(NOT MSVC AND NETUDP_IS_X86)
         set_source_files_properties(src/simd/simd_sse42.cpp TARGET_DIRECTORY netudp_shared
             PROPERTIES COMPILE_FLAGS "-msse4.2 -mpopcnt -mbmi")
         set_source_files_properties(src/simd/simd_avx2.cpp TARGET_DIRECTORY netudp_shared
@@ -153,11 +159,12 @@ if(NETUDP_BUILD_SHARED)
     endif()
 endif()
 
-# --- Per-file SIMD compile flags (non-MSVC only, MSVC enables intrinsics by default) ---
-if(NOT MSVC)
+# --- Per-file SIMD compile flags (non-MSVC, x86/x86_64 only — ARM64 has no SSE/AVX) ---
+if(NOT MSVC AND NETUDP_IS_X86)
     set_source_files_properties(src/simd/simd_sse42.cpp PROPERTIES COMPILE_FLAGS "-msse4.2 -mpopcnt -mbmi")
     set_source_files_properties(src/simd/simd_avx2.cpp PROPERTIES COMPILE_FLAGS "-mavx2 -mbmi2")
 endif()
+message(STATUS "  System processor: ${CMAKE_SYSTEM_PROCESSOR} (x86=${NETUDP_IS_X86})")
 
 target_include_directories(netudp
     PUBLIC
@@ -202,7 +209,7 @@ if(NETUDP_HAS_NETC)
 
     # Fix: Zig CC needs -mxsave for __builtin_ia32_xgetbv in netc SIMD detection
     # Only apply on x86/x64 — ARM64 (Apple Silicon) does not support this flag
-    if(NOT MSVC AND TARGET netc AND (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|i[3-6]86"))
+    if(NOT MSVC AND TARGET netc AND NETUDP_IS_X86)
         set_source_files_properties(
             ${netc_SOURCE_DIR}/src/simd/netc_simd_generic.c
             TARGET_DIRECTORY netc
