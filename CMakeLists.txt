@@ -76,6 +76,12 @@ if(NOT NETUDP_DISABLE_NETC)
         GIT_TAG        main
         GIT_SHALLOW    TRUE
     )
+    # Disable netc's own benchmarks and tests — the bench requires lz4/zstd/zlib
+    # which are not available on all CI runners (e.g. macOS-14). netudp only
+    # needs the library. Also disable netc sanitizers to avoid flag conflicts.
+    set(NETC_BUILD_BENCH        OFF CACHE BOOL "" FORCE)
+    set(NETC_BUILD_TESTS        OFF CACHE BOOL "" FORCE)
+    set(NETC_ENABLE_SANITIZERS  OFF CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(netc)
     set(NETUDP_HAS_NETC TRUE)
 endif()
