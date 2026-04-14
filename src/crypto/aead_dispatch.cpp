@@ -4,6 +4,7 @@
 #include "../core/log.h"
 
 #include <netudp/netudp_types.h>
+#include <cstring>
 
 #if defined(NETUDP_ARCH_X64) || defined(NETUDP_ARCH_X86)
 #ifdef NETUDP_COMPILER_MSVC

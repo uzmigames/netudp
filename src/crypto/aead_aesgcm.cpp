@@ -29,10 +29,10 @@
 
 namespace netudp::crypto {
 
+#ifdef NETUDP_PLATFORM_WINDOWS
+
 /* AES-GCM tag size (always 16 bytes, same as Poly1305) */
 static constexpr int kGcmTagSize = 16;
-
-#ifdef NETUDP_PLATFORM_WINDOWS
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
