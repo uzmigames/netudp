@@ -44,6 +44,7 @@ add_executable(netudp_tests
     test_state_overwrite.cpp
     test_replication.cpp
     test_priority_rate.cpp
+    test_coverage_v13.cpp
 )
 
 # Tests need access to internal src/ headers for SIMD dispatch testing
