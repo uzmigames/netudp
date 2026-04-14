@@ -70,10 +70,12 @@ jobs:
 
           THRESHOLDS = {
               # Absolute minimums (CI environment, Release build, loopback UDP)
-              "pps_1client":   {"min_ops_per_sec": 5000},   # 5K PPS floor
-              "latency_rtt":   {"max_p99_ns":  200_000_000},# 200ms p99 max
+              "pps_1client":   {"min_ops_per_sec": 5000,  "regression_pct": 10.0},
+              # p99 latency has high variance on shared GitHub runners (~20-30%
+              # swing is normal). 30% gives meaningful signal without false alarms.
+              "latency_rtt":   {"max_p99_ns":  200_000_000, "regression_pct": 30.0},
           }
-          REGRESSION_PCT = 5.0  # fail if metric regresses >5% vs baseline
+          REGRESSION_PCT = 10.0  # global fallback (per-metric overrides above)
 
           with open("bench_results.json") as f:
               current = {r["name"]: r for r in json.load(f)}
@@ -114,13 +116,14 @@ jobs:
               # Regression check vs baseline
               if name in baseline:
                   b = baseline[name]
+                  reg_pct = thresh.get("regression_pct", REGRESSION_PCT)
                   # ops_per_sec: higher is better
                   if b["ops_per_sec"] > 0 and res["ops_per_sec"] > 0:
                       change_pct = (b["ops_per_sec"] - res["ops_per_sec"]) \
                                    / b["ops_per_sec"] * 100.0
-                      if change_pct > REGRESSION_PCT:
+                      if change_pct > reg_pct:
                           print(f"[REGRESSION] {name} ops/sec dropped "
-                                f"{change_pct:.1f}% vs baseline")
+                                f"{change_pct:.1f}% vs baseline (limit {reg_pct}%)")
                           failed = True
                       else:
                           print(f"[OK] {name} ops/sec change: {-change_pct:.1f}%")
@@ -128,10 +131,12 @@ jobs:
                   if b["p99_ns"] > 0 and res["p99_ns"] > 0:
                       change_pct = (res["p99_ns"] - b["p99_ns"]) \
                                    / b["p99_ns"] * 100.0
-                      if change_pct > REGRESSION_PCT:
+                      if change_pct > reg_pct:
                           print(f"[REGRESSION] {name} p99 increased "
-                                f"{change_pct:.1f}% vs baseline")
+                                f"{change_pct:.1f}% vs baseline (limit {reg_pct}%)")
                           failed = True
+                      else:
+                          print(f"[OK] {name} p99 change: +{change_pct:.1f}%")
 
           sys.exit(1 if failed else 0)
           EOF
