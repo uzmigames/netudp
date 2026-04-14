@@ -255,6 +255,14 @@ Default is NONE (like WoW, FFXIV, GW2). XOR adds obfuscation with zero size over
 | Replay window check | 32 ns | 26 ns | 9 ns | **3.6×** |
 | Ack bitmask scan | 8.4 ns | 4.7 ns | 4.8 ns | **1.8×** |
 
+### netc Compression (trained dictionary, stateless)
+
+| Payload | Raw | Compressed | Savings | Compress | Decompress |
+|---------|----:|----------:|--------:|---------:|-----------:|
+| Position update (48B) | 48B | 22B | **54%** | 1,050 ns | 270 ns |
+| Combat packet (32B) | 32B | 26B | **19%** | 720 ns | 170 ns |
+| Batch 10 positions (480B) | 480B | 211B | **56%** | 13.3 us | 1.7 us |
+
 ### Frame Coalescing (measured, bench_coalescing)
 
 | Metric | Value |

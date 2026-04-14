@@ -59,6 +59,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Synthetic PPS: 114K @ 1 client, 108K @ 16 clients (CRYPTO_NONE). PvP simulator: 5000 players with UzEngine movement, zone multicast, property replication, combat.
 
+#### netc Compression (trained dictionary, stateless)
+
+| Payload | Raw | Compressed | Savings | Compress | Decompress |
+|---------|----:|----------:|--------:|---------:|-----------:|
+| Position update | 48B | 22B | **54%** | 1,050 ns | 270 ns |
+| Combat packet | 32B | 26B | **19%** | 720 ns | 170 ns |
+| Batch 10 positions | 480B | 211B | **56%** | 13,300 ns | 1,730 ns |
+
 #### Comparison with competition
 
 | Library | Crypto | Players tested | Msgs/s |

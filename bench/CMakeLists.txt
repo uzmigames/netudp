@@ -9,6 +9,7 @@ add_executable(netudp_bench
     bench_throughput.cpp
     bench_crypto.cpp
     bench_pvp_sim.cpp
+    bench_compression.cpp
 )
 
 target_include_directories(netudp_bench PRIVATE
@@ -24,4 +25,10 @@ endif()
 target_compile_definitions(netudp_bench PRIVATE
     $<$<BOOL:${WIN32}>:NOMINMAX>
     $<$<BOOL:${WIN32}>:_CRT_SECURE_NO_WARNINGS>
+    $<$<BOOL:${NETUDP_HAS_NETC}>:NETUDP_HAS_NETC=1>
 )
+
+if(NETUDP_HAS_NETC)
+    target_link_libraries(netudp_bench PRIVATE netc)
+    target_include_directories(netudp_bench PRIVATE ${netc_SOURCE_DIR}/include)
+endif()

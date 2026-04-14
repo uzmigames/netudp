@@ -28,6 +28,7 @@ void register_coalescing_bench(BenchRegistry& reg);
 void register_throughput_bench(BenchRegistry& reg);
 void register_crypto_bench(BenchRegistry& reg);
 void register_pvp_sim_bench(BenchRegistry& reg);
+void register_compression_bench(BenchRegistry& reg);
 
 /* -----------------------------------------------------------------------
  * BenchRegistry implementation
@@ -234,6 +235,7 @@ int main(int argc, char** argv) {
     register_throughput_bench(reg);
     register_crypto_bench(reg);
     register_pvp_sim_bench(reg);
+    register_compression_bench(reg);
 
     int rc = reg.run(filter, cfg, json_out);
 
