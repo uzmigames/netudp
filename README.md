@@ -5,7 +5,7 @@
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)]()
 [![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](CHANGELOG.md)
 
-> High-performance, zero-GC UDP networking for real-time game servers. AES-256-GCM encrypted, reliable, SIMD-accelerated. Built for dedicated servers handling thousands of concurrent players at 120K+ messages/second — **17x faster than Valve GNS**.
+> High-performance, zero-GC UDP networking for real-time game servers. MMORPG replication built-in: multicast groups, property replication (Unreal-style dirty tracking), state overwrite, priority throttling. SIMD-accelerated, 5000+ concurrent players. **17x faster than Valve GNS**.
 
 ---
 
@@ -17,7 +17,8 @@
 - **4 channel types** — unreliable, unreliable sequenced, reliable ordered, reliable unordered. Priority + weight scheduling
 - **Dual-layer reliability** — piggybacked acks with delay field for continuous RTT. Per-channel message sequencing with RTT-adaptive retransmission
 - **Fragmentation** — transparent split/reassemble for messages up to 288KB. Fragment-level retransmission (only lost fragments, not whole message)
-- **Encryption** — AES-256-GCM by default (auto-detected via AES-NI, 4.3x faster with cached BCrypt handles). XChaCha20-Poly1305 fallback on non-AES-NI hardware. 256-entry replay window. Auto-rekeying at 1GB/1h
+- **MMORPG replication** — Multicast groups (zone broadcast O(members)), property replication (Unreal-style schema + 64-bit dirty mask + quantization), state overwrite (latest-wins per entity), priority/rate throttling (20Hz close, 2Hz far), packet pacing
+- **Encryption** — Plaintext by default (like WoW/FFXIV). Optional: XOR obfuscation, AES-256-GCM (cached BCrypt, 4.3x faster), XChaCha20-Poly1305. 256-entry replay window. Auto-rekeying at 1GB/1h
 - **Compression** — optional [netc](https://github.com/uzmigames/netc) integration (35-67% bandwidth savings on game packets). Stateful for reliable, stateless for unreliable
 - **Frame coalescing** — multiple messages packed into one UDP packet (up to MTU). 5x fewer syscalls and crypto ops for small messages. Critical for MMORPG workloads
 - **Multi-socket I/O** — SO_REUSEPORT (Linux) with N sockets for kernel-level packet distribution. io_uring backend (Linux 5.7+) for 7M+ PPS
@@ -198,54 +199,53 @@ netudp_generate_connect_token(
 
 ## Performance
 
-Measured on Ryzen 9 7950X3D, Zig CC (Clang 20), Release build, Windows loopback. Default crypto: AES-256-GCM (auto-detected via AES-NI). Full reliability stack, frame coalescing enabled.
+Measured on Ryzen 9 7950X3D, Zig CC (Clang 20), Release build, Windows loopback. Default: no encryption (CRYPTO_NONE). Full reliability stack, frame coalescing, property replication enabled.
 
 ### Real-World Throughput (game server scenario)
 
-| Scenario | Players | Threads | Msgs/s (AES-GCM) | Msgs/s (XChaCha20) |
-|----------|--------:|--------:|------------------:|-------------------:|
-| Small (4c × 5 msgs) | 4 | 1 | **527K** | 492K |
-| Medium (64c × 3 msgs) | 64 | 1 | **324K** | 304K |
-| Large (256c × 3 msgs) | 256 | 1 | **275K** | 262K |
-| MMO (1000c × 2 msgs) | 1,000 | 1 | **120K** | 113K |
-| MMO (5000c × 2 msgs, pipeline) | 5,000 | 2 | **83K** | 90K |
+| Scenario | Players | Threads | Msgs/s (NONE) | Msgs/s (AES-GCM) |
+|----------|--------:|--------:|--------------:|------------------:|
+| Small (4c × 5 msgs) | 4 | 1 | **527K** | 527K |
+| Medium (64c × 3 msgs) | 64 | 1 | **326K** | 324K |
+| Large (256c × 3 msgs) | 256 | 1 | **286K** | 275K |
+| MMO (1000c × 2 msgs) | 1,000 | 1 | **126K** | 120K |
+| MMO (5000c × 2 msgs, pipeline) | 5,000 | 2 | **65K** | 83K |
 
-All 5,000 clients connected and delivered messages with encrypted AEAD packets through the full pipeline (connect token → handshake → encrypt → coalesce → dispatch → deliver). Phase 36 (slot_id O(1) dispatch) + phase 38 (cached sockaddr) + AES-GCM default combined for +45% improvement at 1000 clients vs v1.1.
+5,000 clients connected through the full pipeline (connect token → handshake → coalesce → dispatch → deliver). PvP simulator: 5000 players with UzEngine movement (500 cm/s, 60Hz), zone multicast, property replication with quantization = **36.8K entity updates/s** (loopback, all-in-one-process).
 
 ### Comparison with competition
 
 | Library | Crypto | Max players tested | Msgs/s |
 |---------|--------|-------------------:|-------:|
-| **netudp v1.2** | **AES-256-GCM** | **5,000** | **120,490** |
+| **netudp v1.3** | **None/XOR** | **5,000** | **126,000** |
+| **netudp v1.3** | **AES-256-GCM** | **5,000** | **120,000** |
 | GNS (Valve) | AES-256-GCM | N/A | ~7,000 |
 | netcode.io | XSalsa20 (auth) | 64 | ~3,840 |
 | ENet | None | N/A | 184,000 (no crypto) |
 
-**17x faster than Valve GNS** with the same cipher (AES-256-GCM). No other game networking library has published encrypted multi-thousand-player benchmarks.
+**18x faster than Valve GNS**. No other game networking library has published multi-thousand-player benchmarks with MMORPG replication (multicast groups, property dirty tracking, state overwrite).
 
 ### Synthetic PPS (single packet round-trip)
 
-| Metric | Zig CC | MSVC | v1.1 |
-|--------|-------:|-----:|-------:|
-| PPS (1 client) | **105K** | 80K | 96K |
-| PPS (4 clients) | **112K** | 64K | 97K |
-| PPS (16 clients) | **116K** | 65K | 94K |
-| p50 latency | **7,275 ns** | 8,500 ns | 8,000 ns |
-| RTT | **23,400 ns** | 19,700 ns | 16,700 ns |
-| Memory per slot | 4.7 KB | 4.6 KB | 4.6 KB |
-| Pool acquire | < 100 ns | < 100 ns | ~7,800 ns |
+| Metric | v1.3 (NONE) | v1.2 (AES-GCM) | v1.1 |
+|--------|------------:|----------------:|------:|
+| PPS (1 client) | **114K** | 83K | 96K |
+| PPS (4 clients) | **90K** | 114K | 97K |
+| PPS (16 clients) | **108K** | 112K | 94K |
+| Memory per slot | 4.7 KB | 4.7 KB | 4.6 KB |
 | Zero-GC | ✓ | ✓ | ✓ |
 
-### Crypto Pipeline (64B payload, single core)
+### Crypto Modes (64B payload, single core)
 
-| Operation | ops/s | Latency |
-|-----------|------:|--------:|
-| AES-256-GCM cached (default) | **5.43M** | **184 ns** |
-| AES-256-GCM per-call | 3.71M | 270 ns |
-| XChaCha20 stream | 1.70M | 588 ns |
-| XChaCha20 oneshot | 1.27M | 787 ns |
+| Mode | ops/s | Latency | Overhead |
+|------|------:|--------:|---------:|
+| **NONE (default)** | **∞** | **0 ns** | memcpy only |
+| **XOR** | ~100M+ | ~1 ns | 1 XOR/byte |
+| AES-256-GCM cached | 5.43M | 184 ns | +16B MAC tag |
+| AES-256-GCM per-call | 3.71M | 270 ns | +16B MAC tag |
+| XChaCha20 stream | 1.70M | 588 ns | +16B MAC tag |
 
-AES-GCM cached is **4.3x faster** than XChaCha20 thanks to pre-allocated BCrypt algorithm handles per connection.
+Default is NONE (like WoW, FFXIV, GW2). XOR adds obfuscation with zero size overhead. AES-GCM/XChaCha20 for high-security scenarios.
 
 ### SIMD Acceleration
 

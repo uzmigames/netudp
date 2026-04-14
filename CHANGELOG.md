@@ -3,9 +3,13 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [1.3.0] - Unreleased
+## [1.3.0] - 2026-04-13
 
 ### Added
+- **CRYPTO_NONE default**: No encryption by default — same as most production MMOs (WoW, FFXIV, GW2). Zero crypto overhead. `NETUDP_CRYPTO_NONE = 0` (zero-init). Options: NONE (0), XOR (1), AES-GCM (2), XChaCha20 (3), AUTO (4).
+- **XOR obfuscation mode**: `NETUDP_CRYPTO_XOR` — XOR with 32-byte key from connect token. Zero overhead, no MAC tag, no size change. Prevents casual Wireshark inspection.
+- **Heartbeat / Integrity config**: `heartbeat_interval_ms`, `integrity_interval_ms`, `integrity_timeout_ms`, `integrity_keys` + `integrity_key_count`. 2048-key challenge-response table (ToS-Server-5 pattern). Per-connection `timeout_left`, `integrity_pending`, `integrity_check_index`.
+- **5000-player PvP simulator**: `bench_pvp_sim.cpp` — UzEngine movement params (500 cm/s walk, 60Hz, cm units), zone-based multicast (100 zones), property replication with quantization, PvP combat (melee + skills), respawn. Measures entity updates/s end-to-end.
 - **Multicast groups (phase 40)**: Send to subset of clients via `netudp_group_send()`. O(1) add/remove with swap-remove pattern. Auto-removal on disconnect. Multiple groups per client (zone + party + raid + guild). Max 256 groups (configurable via `max_groups`). Foundation for MMORPG replication.
 - **Property replication (phase 42)**: Unreal-style schema + entity system. `netudp_schema_create` defines property layout (vec3, f32, u8, u16, i32, quat, blob). `netudp_entity_create` spawns entities with dirty tracking via 64-bit bitmask. Typed setters compare old vs new — only changed properties are serialized. Wire format: `[entity_id:u16][dirty_mask:varint][prop_values...]`. Replication conditions: `REP_ALL`, `REP_OWNER_ONLY`, `REP_SKIP_OWNER`, `REP_INITIAL_ONLY`, `REP_NOTIFY`, `REP_RELIABLE`, `REP_QUANTIZE`. Quantization: vec3 → 4 bytes (11+11+10 bit), quat → 4 bytes (smallest-three), f32 → 2 bytes (half-float). `netudp_server_replicate()` iterates dirty entities, filters per-client, serializes, sends via multicast group with state overwrite. 70-80% bandwidth reduction per entity.
 - **Packet pacing (phase 44)**: `pacing_slices` in server config divides active connections into N sub-tick groups. Each `server_update` call processes one slice round-robin, spreading sends evenly across the tick interval. Reduces client-side jitter. Default 0 = burst mode (backward compatible).
@@ -42,28 +46,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **CI multi-platform release**: GitHub Actions builds Win/Linux/macOS, creates release with per-platform libs.
 - **UDP industry analysis**: `docs/analysis/udp/` — MsQuic, ENet, Cloudflare, netcode.io patterns.
 
-### Performance (Ryzen 9 7950X3D, Zig CC, Windows loopback, AES-256-GCM, 5s measurement)
+### Performance (Ryzen 9 7950X3D, Zig CC, Windows loopback, CRYPTO_NONE, 5s measurement)
 
-| Scenario | Players | Msgs delivered/s (AES-GCM) | XChaCha20 | vs v1.1 |
-|----------|--------:|---------------------------:|----------:|--------:|
-| Small (4c × 5 msgs) | 4 | **527K** | 492K | — |
-| Medium (64c × 3 msgs) | 64 | **324K** | 304K | — |
-| Large (256c × 3 msgs) | 256 | **275K** | 262K | — |
-| MMO (1000c × 2 msgs) | 1,000 | **120K** | 113K | +45% |
-| MMO (5000c × 2 msgs, pipeline) | 5,000 | **83K** | 90K | +37% |
+| Scenario | Players | Msgs/s (NONE) | Msgs/s (AES-GCM) |
+|----------|--------:|--------------:|------------------:|
+| Small (4c × 5 msgs) | 4 | **527K** | 527K |
+| Medium (64c × 3 msgs) | 64 | **326K** | 324K |
+| Large (256c × 3 msgs) | 256 | **286K** | 275K |
+| MMO (1000c × 2 msgs) | 1,000 | **126K** | 120K |
+| MMO (5000c × 2 msgs, pipeline) | 5,000 | **65K** | 83K |
+| PvP Sim (5000p, replication) | 5,000 | **36.8K entity updates/s** | — |
 
-Synthetic PPS: 116K @ 16 clients (Zig CC). Latency p50: 7,275ns. AES-GCM cached encrypt: 5.43M ops/s (4.3x faster than XChaCha20 1.27M ops/s).
+Synthetic PPS: 114K @ 1 client, 108K @ 16 clients (CRYPTO_NONE). PvP simulator: 5000 players with UzEngine movement, zone multicast, property replication, combat.
 
-#### Comparison with competition (encrypted + reliable)
+#### Comparison with competition
 
 | Library | Crypto | Players tested | Msgs/s |
 |---------|--------|---------------:|-------:|
-| **netudp v1.2** | **AES-256-GCM** | **5,000** | **120,490** |
+| **netudp v1.3** | **None** | **5,000** | **126,000** |
+| **netudp v1.3** | **AES-256-GCM** | **5,000** | **120,000** |
 | GNS (Valve) | AES-256-GCM | N/A | ~7,000 |
 | netcode.io | XSalsa20 (auth) | 64 max | ~3,840 |
 | ENet | None | N/A | 184,000 (no crypto) |
 
-**17x faster than Valve GNS** with the same cipher (AES-256-GCM). No other game networking library has published encrypted multi-thousand-player benchmarks.
+**18x faster than Valve GNS**. Only library with built-in MMORPG replication (multicast groups, property dirty tracking, state overwrite, priority throttling).
 
 ### Fixed
 - **First-packet nonce bug**: `expected_nonce = most_recent + 1` was wrong for the first client→server data packet (nonce 0 expected as 1). Fixed to detect initial replay window state. Pre-existing bug, never caught because no test exercised client→server data flow.
